@@ -1,0 +1,42 @@
+[Unit]
+Description=Unly Personal AI Agent Platform
+Documentation=https://github.com/oblivisheee/unly
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=unly
+Group=unly
+WorkingDirectory=/opt/unly
+ExecStart=/opt/unly/bin/unly start --config /etc/unly/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+
+# Environment file for secrets (not version-controlled)
+EnvironmentFile=-/etc/unly/unly.env
+
+# Logging — integrates with journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unly
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/unly/data /var/log/unly
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

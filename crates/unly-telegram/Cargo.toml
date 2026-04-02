@@ -1,0 +1,27 @@
+[package]
+name = "unly-telegram"
+description = "Telegram bot interface for the unly agent platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+unly-core.workspace = true
+unly-config.workspace = true
+unly-db.workspace = true
+unly-agent.workspace = true
+unly-audit.workspace = true
+unly-providers.workspace = true
+unly-tools.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+teloxide = { workspace = true }
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+futures.workspace = true

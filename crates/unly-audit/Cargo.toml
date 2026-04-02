@@ -1,0 +1,19 @@
+[package]
+name = "unly-audit"
+description = "Append-only audit logging pipeline for the unly agent platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+unly-core.workspace = true
+unly-db.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+tracing.workspace = true

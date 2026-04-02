@@ -1,0 +1,27 @@
+[package]
+name = "unly-providers"
+description = "LLM provider abstraction layer (GitHub Copilot, OpenAI-compatible) for the unly agent platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+unly-core.workspace = true
+unly-config.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+base64.workspace = true
+parking_lot.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

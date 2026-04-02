@@ -1,0 +1,19 @@
+[package]
+name = "unly-plugins"
+description = "Plugin system with typed SDK, manifest, lifecycle management for the unly agent platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+unly-core.workspace = true
+unly-config.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+chrono.workspace = true

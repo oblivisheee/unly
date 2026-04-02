@@ -1,0 +1,13 @@
+[package]
+name = "unly-plugin-example"
+version = "0.1.0"
+edition = "2021"
+description = "Example plugin demonstrating the unly plugin SDK"
+
+[dependencies]
+unly-core = { path = "../../crates/unly-core" }
+unly-plugins = { path = "../../crates/unly-plugins" }
+async-trait = "0.1"
+serde_json = "1"
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
