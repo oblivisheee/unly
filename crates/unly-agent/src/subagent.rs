@@ -1,12 +1,10 @@
 use std::sync::Arc;
-use tokio::sync::oneshot;
-use tracing::{info, warn};
-use uuid::Uuid;
+use tracing::info;
 
 use unly_core::{
     ids::AgentId,
     permissions::PermissionSet,
-    types::{ExecutionStatus, Timestamp},
+    types::ExecutionStatus,
     Result,
 };
 

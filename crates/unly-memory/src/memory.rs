@@ -1,7 +1,7 @@
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::debug;
 use uuid::Uuid;
 
 use unly_core::{
@@ -16,7 +16,6 @@ use unly_db::{
 };
 
 use crate::{
-    error::MemoryError,
     scope::MemoryScope,
     similarity::{cosine_similarity, deserialize_embedding, serialize_embedding},
 };
@@ -55,7 +54,9 @@ pub struct MemoryStore {
     db: Database,
     embedding_provider: Arc<dyn Provider>,
     embedding_model: String,
+    #[allow(dead_code)]
     top_k: usize,
+    #[allow(dead_code)]
     similarity_threshold: f32,
 }
 
@@ -227,7 +228,7 @@ impl MemoryStore {
     }
 
     /// Count entries for a scope.
-    pub async fn count(&self, scope: &MemoryScope) -> Result<i64> {
+    pub async fn count(&self, scope: &MemoryScope) -> Result<u64> {
         let repo = MemoryRepo::new(self.db.conn());
         repo.count_by_scope(scope.scope_type(), scope.scope_id())
             .await

@@ -14,10 +14,7 @@ use unly_db::{
     Database,
 };
 
-use crate::{
-    error::SchedulerError,
-    job::{JobDefinition, JobType},
-};
+use crate::job::JobDefinition;
 
 /// Callback type for job execution.
 pub type JobCallback =

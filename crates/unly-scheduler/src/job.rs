@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use unly_core::types::Timestamp;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

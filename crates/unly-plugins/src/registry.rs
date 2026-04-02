@@ -6,7 +6,6 @@ use tracing::{info, warn};
 use unly_core::Result;
 
 use crate::{
-    error::PluginError,
     plugin::{Plugin, PluginEvent},
 };
 
@@ -15,6 +14,7 @@ const PLATFORM_VERSION: &str = "0.1.0";
 /// Registry for all installed plugins.
 pub struct PluginRegistry {
     plugins: Arc<RwLock<HashMap<String, Box<dyn Plugin>>>>,
+    #[allow(dead_code)]
     enabled: Vec<String>,
     disabled: Vec<String>,
 }

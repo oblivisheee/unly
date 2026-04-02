@@ -1,12 +1,11 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::info;
 
 use unly_core::{
-    model::{ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Model},
     provider::Provider,
-    types::{HealthReport, HealthStatus, ProviderCapabilities},
+    types::HealthReport,
     Error, Result,
 };
 
@@ -43,7 +42,7 @@ impl ProviderRegistry {
     pub fn default_provider(&self) -> Result<Arc<dyn Provider>> {
         let name = self.default_provider.read().clone();
         self.get(&name)
-            .ok_or_else(|| Error::ProviderNotFound(name))
+            .ok_or(Error::ProviderNotFound(name))
     }
 
     /// Get the configured default model name.

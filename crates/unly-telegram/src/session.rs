@@ -33,4 +33,9 @@ impl SessionStore {
     pub fn len(&self) -> usize {
         self.sessions.read().len()
     }
+
+    /// Whether there are no active sessions.
+    pub fn is_empty(&self) -> bool {
+        self.sessions.read().is_empty()
+    }
 }

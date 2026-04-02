@@ -1,6 +1,5 @@
-use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use unly_db::{repo::audit::AuditRow, Database};

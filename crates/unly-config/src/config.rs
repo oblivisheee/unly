@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Top-level application configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     pub telegram: TelegramConfig,
     pub database: DatabaseConfig,
@@ -15,24 +15,6 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub webhook: WebhookConfig,
     pub security: SecurityConfig,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            telegram: TelegramConfig::default(),
-            database: DatabaseConfig::default(),
-            memory: MemoryConfig::default(),
-            providers: ProvidersConfig::default(),
-            tools: ToolsConfig::default(),
-            agent: AgentConfig::default(),
-            scheduler: SchedulerConfig::default(),
-            plugins: PluginsConfig::default(),
-            logging: LoggingConfig::default(),
-            webhook: WebhookConfig::default(),
-            security: SecurityConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
