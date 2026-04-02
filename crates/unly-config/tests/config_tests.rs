@@ -1,6 +1,6 @@
 //! Tests for configuration loading and defaults.
 
-use unly_config::{default_config, AppConfig};
+use unly_config::default_config;
 
 #[test]
 fn default_config_is_valid_structure() {

@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult, ToolRisk},
+    tool::{Tool, ToolContext, ToolResult},
     Error, Result,
 };
 

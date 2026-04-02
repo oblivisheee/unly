@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use unly_core::{
     ids::{AgentId, ChatId, UserId},
-    message::Chat,
     model::ChatMessage,
     permissions::PermissionSet,
     types::Timestamp,

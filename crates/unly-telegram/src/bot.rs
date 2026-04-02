@@ -6,14 +6,14 @@ use teloxide::{
     },
     utils::command::BotCommands,
 };
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use unly_agent::{AgentContext, AgentResponse, AgentRuntime, AgentRuntimeConfig};
+use unly_agent::{AgentContext, AgentResponse, AgentRuntime};
 use unly_audit::AuditLogger;
 use unly_config::AppConfig;
 use unly_db::Database;
 use unly_providers::ProviderRegistry;
-use unly_core::{ids::ChatId, permissions::PermissionSet};
+use unly_core::ids::ChatId;
 
 use crate::{
     commands::Command,
@@ -90,8 +90,8 @@ impl TelegramBot {
         msg: Message,
         cmd: Command,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let from = match msg.from() {
-            Some(u) => u.clone(),
+        let from = match msg.from {
+            Some(ref u) => u.clone(),
             None => return Ok(()),
         };
         let tg_user_id = from.id.0 as i64;
@@ -378,8 +378,8 @@ impl TelegramBot {
         bot: Bot,
         msg: Message,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let from = match msg.from() {
-            Some(u) => u.clone(),
+        let from = match msg.from {
+            Some(ref u) => u.clone(),
             None => return Ok(()),
         };
         let tg_user_id = from.id.0 as i64;

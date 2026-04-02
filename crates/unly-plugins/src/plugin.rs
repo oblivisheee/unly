@@ -71,12 +71,12 @@ pub trait Plugin: Send + Sync {
     }
 
     /// Handle a platform event.
-    async fn on_event(&self, event: &PluginEvent) -> Result<()> {
+    async fn on_event(&self, _event: &PluginEvent) -> Result<()> {
         Ok(())
     }
 
     /// Execute a plugin command. Returns the response text.
-    async fn execute_command(&self, command: &str, args: &str, chat_id: &str) -> Result<String> {
+    async fn execute_command(&self, command: &str, _args: &str, _chat_id: &str) -> Result<String> {
         Ok(format!("Command '{}' not implemented", command))
     }
 }

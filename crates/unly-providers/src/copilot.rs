@@ -12,11 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use unly_core::{
     model::{
-        ChatRequest, ChatResponse, ChatMessage, ChatMessageContent, ContentPart, EmbeddingRequest,
+        ChatRequest, ChatResponse, ChatMessageContent, ContentPart, EmbeddingRequest,
         EmbeddingResponse, FunctionCall, Model, ToolCall, Usage,
     },
     provider::Provider,
@@ -28,9 +28,7 @@ use crate::error::{ProviderError, ProviderResult};
 
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const GITHUB_API_URL: &str = "https://api.github.com";
 const COPILOT_TOKENS_URL: &str = "https://api.github.com/copilot_internal/v2/token";
-const COPILOT_API_URL: &str = "https://api.githubcopilot.com";
 
 /// Cached GitHub OAuth token persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,7 +96,7 @@ impl CopilotProvider {
             std::fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(token)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         std::fs::write(&self.token_cache_path, content)?;
         // Set restrictive file permissions on Unix.
         #[cfg(unix)]

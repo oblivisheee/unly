@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config};
@@ -72,7 +72,7 @@ pub enum Commands {
     Audit {
         /// Number of entries to show.
         #[arg(short, long, default_value = "20")]
-        n: i64,
+        n: u64,
     },
 
     /// Memory management commands.
@@ -428,7 +428,7 @@ impl Cli {
                     JobCommands::Run { id } => {
                         println!("Triggering job: {} (not yet fully implemented via CLI)", id);
                     }
-                    JobCommands::Enable { id } | JobCommands::Disable { id } => {
+                    JobCommands::Enable { id: _ } | JobCommands::Disable { id: _ } => {
                         println!("Update job enabled state via the database or config.");
                     }
                 }

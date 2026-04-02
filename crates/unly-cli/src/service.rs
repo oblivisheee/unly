@@ -1,12 +1,9 @@
-use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use anyhow::Result;
 use std::sync::Arc;
-use tracing::{error, info, warn};
 
 use unly_agent::{AgentRuntime, AgentRuntimeConfig};
 use unly_audit::AuditLogger;
-use unly_config::{default_config, load_config, AppConfig};
-use unly_db::Database;
+use unly_config::AppConfig;
 use unly_providers::{
     copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
 };

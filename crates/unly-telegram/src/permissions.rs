@@ -1,4 +1,4 @@
-use unly_core::permissions::{Permission, PermissionSet, UserRole};
+use unly_core::permissions::PermissionSet;
 
 /// Check whether a Telegram user ID is in the admin list.
 pub fn is_admin(telegram_user_id: i64, admin_ids: &[i64]) -> bool {

@@ -1,7 +1,7 @@
 //! Integration tests for unly-core domain types.
 
 use unly_core::{
-    ids::{AgentId, ChatId, UserId},
+    ids::ChatId,
     permissions::{Permission, PermissionSet, UserRole},
 };
 
@@ -15,26 +15,26 @@ fn ids_are_unique() {
 #[test]
 fn admin_permissions_have_all_capabilities() {
     let perms = PermissionSet::admin();
-    assert!(perms.has(Permission::Chat));
-    assert!(perms.has(Permission::UseTools));
-    assert!(perms.has(Permission::ApproveTools));
-    assert!(perms.has(Permission::ViewAudit));
-    assert!(perms.has(Permission::ManageJobs));
-    assert!(perms.has(Permission::ManagePlugins));
+    assert!(perms.has(&Permission::Chat));
+    assert!(perms.has(&Permission::ExecuteTools));
+    assert!(perms.has(&Permission::ExecutePrivilegedTools));
+    assert!(perms.has(&Permission::ViewAuditLog));
+    assert!(perms.has(&Permission::ManageJobs));
+    assert!(perms.has(&Permission::ManagePlugins));
 }
 
 #[test]
 fn basic_user_permissions_are_restricted() {
     let perms = PermissionSet::basic_user();
-    assert!(perms.has(Permission::Chat));
-    assert!(perms.has(Permission::UseTools));
-    assert!(!perms.has(Permission::ViewAudit));
-    assert!(!perms.has(Permission::ManageJobs));
-    assert!(!perms.has(Permission::ManagePlugins));
+    assert!(perms.has(&Permission::Chat));
+    assert!(!perms.has(&Permission::ExecuteTools));
+    assert!(!perms.has(&Permission::ViewAuditLog));
+    assert!(!perms.has(&Permission::ManageJobs));
+    assert!(!perms.has(&Permission::ManagePlugins));
 }
 
 #[test]
 fn user_role_display() {
-    assert_eq!(UserRole::Admin.as_str(), "admin");
-    assert_eq!(UserRole::User.as_str(), "user");
+    assert_eq!(UserRole::Admin.to_string(), "admin");
+    assert_eq!(UserRole::User.to_string(), "user");
 }

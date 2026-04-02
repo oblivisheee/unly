@@ -1,11 +1,8 @@
 use std::sync::Arc;
-use tracing::{debug, info, warn};
-use uuid::Uuid;
+use tracing::warn;
 
 use unly_core::{
-    ids::{ChatId, UserId},
-    model::{ChatMessage, ChatMessageContent, ChatRequest, FunctionCall, ToolCall},
-    permissions::PermissionSet,
+    model::{ChatMessage, ChatMessageContent, ChatRequest},
     provider::Provider,
     tool::ToolContext,
     Result,
@@ -93,9 +90,8 @@ impl AgentRuntime {
 
         // Agentic loop.
         let mut loop_count = 0u32;
-        let mut final_response = String::new();
 
-        loop {
+        let final_response = loop {
             ctx.trim_to(self.config.context_window_size);
 
             let request = ChatRequest {
@@ -227,16 +223,16 @@ impl AgentRuntime {
             }
 
             // No tool calls — this is the final text response.
-            final_response = response.content.unwrap_or_default();
+            let text = response.content.unwrap_or_default();
             ctx.push_message(ChatMessage {
                 role: "assistant".to_string(),
-                content: ChatMessageContent::Text(final_response.clone()),
+                content: ChatMessageContent::Text(text.clone()),
                 tool_call_id: None,
                 tool_calls: None,
                 name: None,
             });
-            break;
-        }
+            break text;
+        };
 
         Ok(AgentResponse::Text(final_response))
     }
