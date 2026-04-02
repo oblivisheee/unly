@@ -1,8 +1,8 @@
 # unly
 
-**Your self-hosted personal AI agent, accessible via Telegram.**
+**Self-hosted personal AI agent, accessible via Telegram.**
 
-Unly is a Rust-based platform that turns any Telegram chat into a powerful, agentic AI assistant. It connects to GitHub Copilot (or any OpenAI-compatible API), maintains long-term semantic memory, executes tools with a built-in approval workflow, and runs entirely on your own infrastructure.
+Unly is a Rust-based platform that turns any Telegram chat into an agentic AI assistant. It connects to GitHub Copilot (or any OpenAI-compatible API), maintains long-term semantic memory, executes tools with a built-in approval workflow, and runs entirely on your own infrastructure.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -10,97 +10,40 @@ Unly is a Rust-based platform that turns any Telegram chat into a powerful, agen
 
 ## Features
 
-- 🤖 **Telegram-first interface** — talk to your agent through any Telegram client
-- 🧠 **Semantic memory** — remembers past conversations with vector similarity search (SQLite-backed, no external DB)
-- 🔌 **Multi-provider LLM** — GitHub Copilot out of the box, plus any OpenAI-compatible API (OpenAI, Ollama, etc.)
-- 🛠 **Agentic tool execution** — HTTP requests, file I/O, git inspection, shell commands
-- ✅ **Approval workflow** — privileged and dangerous tools require explicit `/approve` in chat
-- 🔒 **Security by default** — allowlist-based access control, audit trail, secret redaction, shell disabled unless configured
-- 📅 **Job scheduler** — cron-based background tasks
-- 🧩 **Plugin system** — extend capabilities with your own Rust plugins
-- 📋 **Append-only audit log** — every tool call, approval, and denial is recorded
+- **Telegram-first interface** — talk to your agent through any Telegram client
+- **Semantic memory** — remembers past conversations using vector similarity search (SQLite-backed, no external DB)
+- **Multi-provider LLM** — GitHub Copilot out of the box, plus any OpenAI-compatible API (OpenAI, Ollama, etc.)
+- **Agentic tool execution** — HTTP requests, file I/O, git inspection, shell commands
+- **Approval workflow** — privileged and dangerous tools require explicit `/approve` before execution
+- **Security by default** — allowlist-based access control, audit trail, secret redaction, shell disabled unless configured
+- **Job scheduler** — cron-based background tasks
+- **Plugin system** — extend capabilities with your own Rust plugins
+- **Append-only audit log** — every tool call, approval, and denial is recorded
 
 ---
 
-## Quick Start
+## Install
 
-### Prerequisites
-
-- **Linux** (Ubuntu 22.04+ recommended)
-- **Rust 1.75+**
-  ```bash
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-  ```
-- A **Telegram bot token** — create one with [@BotFather](https://t.me/BotFather)
-- Your **Telegram user ID** — get it from [@userinfobot](https://t.me/userinfobot)
-- A **GitHub account with GitHub Copilot** access *(or any OpenAI-compatible API key)*
-
----
-
-### Step 1 — Clone and build
+Run the installer — it handles Rust, the build, and the onboarding wizard in one step:
 
 ```bash
-git clone https://github.com/oblivisheee/unly
-cd unly
-cargo build --release
+bash <(curl -fsSL https://raw.githubusercontent.com/oblivisheee/unly/main/install.sh)
 ```
 
-The binary is produced at `./target/release/unly`.
-
----
-
-### Step 2 — Generate the default config
+Or, from a local clone:
 
 ```bash
-./target/release/unly init-config
+bash install.sh
 ```
 
-This creates `config.toml` in the current directory. Open it and set the minimum required values:
+Before running, you will need:
 
-```toml
-[telegram]
-bot_token = "YOUR_BOT_TOKEN_FROM_BOTFATHER"
-admin_user_ids = [123456789]   # Your Telegram numeric user ID
-open_access = false            # Only allow listed users
-```
+- Linux (Ubuntu 22.04+ recommended)
+- A Telegram bot token — create one with [@BotFather](https://t.me/BotFather)
+- Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot)
+- A GitHub account with GitHub Copilot access *(or any OpenAI-compatible API key)*
 
-> **Tip:** `bot_token` can also be set via the `TELEGRAM_BOT_TOKEN` environment variable instead of the config file.
-
----
-
-### Step 3 — Authenticate with GitHub Copilot
-
-```bash
-./target/release/unly provider-login copilot
-```
-
-Follow the on-screen instructions (device flow — open the URL, enter the code). The token is cached at `data/github_token.json`.
-
-> **Using a different provider?** Skip this step and add an OpenAI-compatible block instead (see [Configuration](#configuration) below).
-
----
-
-### Step 4 — Validate your setup
-
-```bash
-# Check config for errors
-./target/release/unly validate
-
-# Run full diagnostics (database, providers, tools)
-./target/release/unly doctor
-```
-
-Fix any errors reported before continuing.
-
----
-
-### Step 5 — Start the bot
-
-```bash
-./target/release/unly start
-```
-
-Open Telegram, find your bot and send `/start`. You're live!
+After the build completes, the onboarding wizard (`unly setup`) will guide you through the remaining steps.
 
 ---
 
