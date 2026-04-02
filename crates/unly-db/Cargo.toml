@@ -1,0 +1,19 @@
+[package]
+name = "unly-db"
+description = "SeaORM-based database access layer and migrations for the unly agent platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+unly-core.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+async-trait.workspace = true

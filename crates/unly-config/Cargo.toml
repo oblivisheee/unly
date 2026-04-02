@@ -1,0 +1,22 @@
+[package]
+name = "unly-config"
+description = "Configuration loading and validation for the unly agent platform"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+unly-core.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+figment.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

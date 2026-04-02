@@ -1,0 +1,53 @@
+//! Tests for configuration loading and defaults.
+
+use unly_config::{default_config, AppConfig};
+
+#[test]
+fn default_config_is_valid_structure() {
+    let config = default_config();
+    // Providers default to copilot
+    assert_eq!(config.providers.default_provider, "copilot");
+    assert!(!config.providers.default_model.is_empty());
+    // Security is on by default
+    assert!(config.security.redact_secrets);
+    // Shell is disabled by default
+    assert!(config.tools.shell_allowlist.is_empty());
+    // Approval required for privileged tools by default
+    assert!(config.tools.require_approval_for_privileged);
+    assert!(config.tools.require_approval_for_dangerous);
+    // Open access is off by default
+    assert!(!config.telegram.open_access);
+}
+
+#[test]
+fn default_config_has_safe_tool_defaults() {
+    let config = default_config();
+    let enabled = &config.tools.enabled_tools;
+    assert!(enabled.contains(&"http_get".to_string()));
+    assert!(enabled.contains(&"fs_read".to_string()));
+    assert!(enabled.contains(&"git_status".to_string()));
+    // shell is NOT in the default enabled list
+    assert!(!enabled.contains(&"shell".to_string()));
+}
+
+#[test]
+fn default_database_path_is_relative() {
+    let config = default_config();
+    // Just a sanity check — not an absolute system path
+    assert!(!config.database.path.to_string_lossy().starts_with('/'));
+}
+
+#[test]
+fn default_config_serializes_to_toml() {
+    let config = default_config();
+    let toml = toml::to_string_pretty(&config);
+    assert!(
+        toml.is_ok(),
+        "default config must serialize to TOML: {:?}",
+        toml.err()
+    );
+    let content = toml.unwrap();
+    assert!(content.contains("[telegram]"));
+    assert!(content.contains("[database]"));
+    assert!(content.contains("[providers]"));
+}
