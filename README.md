@@ -4,7 +4,7 @@
 
 Unly is a Rust-based platform that turns any Telegram chat into an agentic AI assistant. It connects to GitHub Copilot (or any OpenAI-compatible API), maintains long-term semantic memory, executes tools with a built-in approval workflow, and runs entirely on your own infrastructure.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](LICENSE)
 
 ---
 
@@ -233,4 +233,4 @@ config.toml              # Main configuration
 
 ## License
 
-[MIT](LICENSE)
+[GPL-3.0](LICENSE)
