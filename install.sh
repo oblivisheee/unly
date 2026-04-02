@@ -5,17 +5,20 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/oblivisheee/unly/main/install.sh)
 #   or, from a local clone:
 #   bash install.sh
+#   force local install mode:
+#   bash install.sh --local
 #
 # What this script does:
 #   1. Installs Rust (via rustup) if not already present.
-#   2. Clones the repository if the script is not already running inside it.
-#   3. Builds the release binary.
+#   2. Installs `unly` via cargo install.
+#   3. Ensures Cargo bin path is on PATH.
 #   4. Runs the first-run onboarding wizard (unly setup).
 
 set -euo pipefail
 
 REPO_URL="https://github.com/oblivisheee/unly"
-INSTALL_DIR="${UNLY_DIR:-$HOME/.local/share/unly}"
+CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+LOCAL_ONLY=false
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -28,6 +31,32 @@ die()   { printf '\033[1;31mError: %s\033[0m\n' "$*" >&2; exit 1; }
 require_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "'$1' is required but not found. $2"
 }
+
+print_usage() {
+    cat <<EOF
+Usage: bash install.sh [--local]
+
+Options:
+  --local   Install only from the current local repository (no remote fetch).
+  -h, --help  Show this help message.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --local)
+            LOCAL_ONLY=true
+            shift
+            ;;
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        *)
+            die "Unknown argument: $1"
+            ;;
+    esac
+done
 
 # ---------------------------------------------------------------------------
 # 1. Rust
@@ -51,52 +80,52 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Repository
+# 2. Install via cargo
 # ---------------------------------------------------------------------------
 
-# Detect whether we are already inside the unly repository.
-if [ -f "Cargo.toml" ] && grep -q 'name = "unly"' Cargo.toml 2>/dev/null; then
-    REPO_DIR="$(pwd)"
-    info "Using existing repository at $REPO_DIR"
-else
-    require_cmd git "Please install git first."
-    if [ -d "$INSTALL_DIR/.git" ]; then
-        info "Updating existing clone at $INSTALL_DIR..."
-        git -C "$INSTALL_DIR" pull --ff-only
-    else
-        info "Cloning $REPO_URL into $INSTALL_DIR..."
-        git clone "$REPO_URL" "$INSTALL_DIR"
+if [ "$LOCAL_ONLY" = true ]; then
+    if [ ! -f "Cargo.toml" ]; then
+        die "--local requires running inside the local unly repository root"
     fi
-    REPO_DIR="$INSTALL_DIR"
-    cd "$REPO_DIR"
+    REPO_DIR="$(pwd)"
+    info "Installing from local repository at $REPO_DIR (--local)..."
+    cargo install --path crates/unly-cli --force
+elif [ -f "Cargo.toml" ] && grep -q 'name = "unly"' Cargo.toml 2>/dev/null; then
+    REPO_DIR="$(pwd)"
+    info "Installing from local repository at $REPO_DIR..."
+    cargo install --path crates/unly-cli --force
+else
+    info "Installing from GitHub repository..."
+    cargo install --git "$REPO_URL" --bin unly --force
 fi
 
-# ---------------------------------------------------------------------------
-# 3. Build
-# ---------------------------------------------------------------------------
-
-info "Building release binary (this may take a few minutes)..."
-cargo build --release 2>&1
-
-BINARY="$REPO_DIR/target/release/unly"
-[ -x "$BINARY" ] || die "Build succeeded but binary not found at $BINARY"
-ok "Binary built: $BINARY"
+BINARY="$CARGO_BIN_DIR/unly"
+[ -x "$BINARY" ] || die "Install succeeded but binary not found at $BINARY"
+ok "Binary installed: $BINARY"
 
 # ---------------------------------------------------------------------------
-# 4. Convenience symlink (optional, skip if /usr/local/bin is not writable)
+# 3. Ensure PATH includes cargo bin
 # ---------------------------------------------------------------------------
 
-LINK_TARGET="/usr/local/bin/unly"
-if [ -w "/usr/local/bin" ] && [ ! -e "$LINK_TARGET" ]; then
-    ln -sf "$BINARY" "$LINK_TARGET"
-    ok "Symlink created: $LINK_TARGET"
-elif [ ! -w "/usr/local/bin" ]; then
-    printf '\nNote: Add %s to your PATH to run unly from anywhere:\n' "$REPO_DIR/target/release"
-    printf '  export PATH="%s:$PATH"\n\n' "$REPO_DIR/target/release"
-fi
+ensure_path_entry() {
+    local shell_rc="$1"
+    local line='export PATH="$HOME/.cargo/bin:$PATH"'
+    if [ -f "$shell_rc" ] && grep -Fq "$line" "$shell_rc"; then
+        return 0
+    fi
+    printf '\n# Added by unly installer\n%s\n' "$line" >> "$shell_rc"
+}
+
+case "${SHELL:-}" in
+    */zsh) ensure_path_entry "$HOME/.zshrc" ;;
+    */bash) ensure_path_entry "$HOME/.bashrc" ;;
+esac
+
+export PATH="$CARGO_BIN_DIR:$PATH"
+ok "PATH updated for current shell ($CARGO_BIN_DIR)"
 
 # ---------------------------------------------------------------------------
-# 5. Onboarding wizard
+# 4. Onboarding wizard
 # ---------------------------------------------------------------------------
 
 info "Launching onboarding wizard..."

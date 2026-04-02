@@ -102,10 +102,7 @@ impl Tool for GitLogTool {
         let start = Instant::now();
         let dir = args["path"].as_str().map(PathBuf::from);
         let n = args["n"].as_u64().unwrap_or(10).min(100).to_string();
-        match run_git(
-            &["log", "--oneline", &format!("-{}", n)],
-            dir.as_ref(),
-        ) {
+        match run_git(&["log", "--oneline", &format!("-{}", n)], dir.as_ref()) {
             Ok(output) => Ok(ToolResult::success(
                 ctx.tool_call_id.clone(),
                 output,

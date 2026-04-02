@@ -19,10 +19,7 @@ pub enum PluginEvent {
         content: String,
     },
     /// A tool was executed.
-    ToolExecuted {
-        tool_name: String,
-        success: bool,
-    },
+    ToolExecuted { tool_name: String, success: bool },
     /// Custom event payload.
     Custom { event_type: String, payload: Value },
 }

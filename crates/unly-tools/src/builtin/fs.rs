@@ -16,7 +16,8 @@ impl Tool for FsReadTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "fs_read".to_string(),
-            description: "Read the contents of a file. Only allowed paths are accessible.".to_string(),
+            description: "Read the contents of a file. Only allowed paths are accessible."
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -126,9 +127,18 @@ impl Tool for FsListTool {
             Ok(entries) => {
                 let mut lines = Vec::new();
                 for entry in entries.flatten() {
-                    let file_type = entry.file_type().map(|ft| {
-                        if ft.is_dir() { "dir" } else if ft.is_file() { "file" } else { "other" }
-                    }).unwrap_or("unknown");
+                    let file_type = entry
+                        .file_type()
+                        .map(|ft| {
+                            if ft.is_dir() {
+                                "dir"
+                            } else if ft.is_file() {
+                                "file"
+                            } else {
+                                "other"
+                            }
+                        })
+                        .unwrap_or("unknown");
                     let name = entry.file_name().to_string_lossy().to_string();
                     lines.push(format!("{}\t{}", file_type, name));
                 }

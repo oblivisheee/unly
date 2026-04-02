@@ -15,10 +15,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Serialize a Vec<f32> to bytes (little-endian IEEE 754).
 pub fn serialize_embedding(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect()
+    embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
 /// Deserialize bytes to a Vec<f32> (little-endian IEEE 754).

@@ -10,8 +10,8 @@ fn default_config_is_valid_structure() {
     assert!(!config.providers.default_model.is_empty());
     // Security is on by default
     assert!(config.security.redact_secrets);
-    // Shell is disabled by default
-    assert!(config.tools.shell_allowlist.is_empty());
+    // Shell is restricted by default via allowlist
+    assert!(!config.tools.shell_allowlist.is_empty());
     // Approval required for privileged tools by default
     assert!(config.tools.require_approval_for_privileged);
     assert!(config.tools.require_approval_for_dangerous);
@@ -26,8 +26,7 @@ fn default_config_has_safe_tool_defaults() {
     assert!(enabled.contains(&"http_get".to_string()));
     assert!(enabled.contains(&"fs_read".to_string()));
     assert!(enabled.contains(&"git_status".to_string()));
-    // shell is NOT in the default enabled list
-    assert!(!enabled.contains(&"shell".to_string()));
+    assert!(enabled.contains(&"bash".to_string()));
 }
 
 #[test]

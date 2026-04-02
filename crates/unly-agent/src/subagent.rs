@@ -1,12 +1,7 @@
 use std::sync::Arc;
 use tracing::info;
 
-use unly_core::{
-    ids::AgentId,
-    permissions::PermissionSet,
-    types::ExecutionStatus,
-    Result,
-};
+use unly_core::{ids::AgentId, permissions::PermissionSet, types::ExecutionStatus, Result};
 
 use crate::context::AgentContext;
 use crate::runtime::{AgentResponse, AgentRuntime};
@@ -53,7 +48,10 @@ pub async fn spawn_subagent(
         .provider
         .clone()
         .unwrap_or_else(|| "copilot".to_string());
-    let model = request.model.clone().unwrap_or_else(|| "gpt-4o".to_string());
+    let model = request
+        .model
+        .clone()
+        .unwrap_or_else(|| "gpt-4o".to_string());
 
     let mut ctx = AgentContext::new(
         chat_id,
@@ -69,9 +67,7 @@ pub async fn spawn_subagent(
     ctx.agent_id = agent_id;
     ctx.subagent_depth = request.depth + 1;
 
-    let response = runtime
-        .process(&mut ctx, request.goal.clone())
-        .await?;
+    let response = runtime.process(&mut ctx, request.goal.clone()).await?;
 
     Ok(SubagentHandle {
         id: agent_id,

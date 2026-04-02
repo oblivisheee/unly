@@ -23,10 +23,15 @@ impl Database {
     /// runs pending migrations when `auto_migrate` is set.
     pub async fn connect_with_config(config: &DatabaseConfig) -> DbResult<Self> {
         match config.db_type {
-            DbType::Sqlite => Self::connect_sqlite(&config.path, config.max_connections, config.auto_migrate).await,
+            DbType::Sqlite => {
+                Self::connect_sqlite(&config.path, config.max_connections, config.auto_migrate)
+                    .await
+            }
             DbType::Postgres => {
                 let url = config.postgres_url.as_deref().ok_or_else(|| {
-                    DbError::Config("postgres_url must be set when db_type = \"postgres\"".to_string())
+                    DbError::Config(
+                        "postgres_url must be set when db_type = \"postgres\"".to_string(),
+                    )
                 })?;
                 Self::connect_postgres(url, config.max_connections, config.auto_migrate).await
             }
@@ -81,7 +86,10 @@ impl Database {
         conn.execute_unprepared("PRAGMA foreign_keys=ON").await?;
         conn.execute_unprepared("PRAGMA synchronous=NORMAL").await?;
 
-        let db = Self { conn, db_type: DbType::Sqlite };
+        let db = Self {
+            conn,
+            db_type: DbType::Sqlite,
+        };
 
         if auto_migrate {
             db.migrate().await?;
@@ -106,7 +114,10 @@ impl Database {
 
         let conn = SeaDatabase::connect(opts).await?;
 
-        let db = Self { conn, db_type: DbType::Postgres };
+        let db = Self {
+            conn,
+            db_type: DbType::Postgres,
+        };
 
         if auto_migrate {
             db.migrate().await?;

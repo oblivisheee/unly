@@ -14,7 +14,7 @@ Unly is a Rust-based platform that turns any Telegram chat into an agentic AI as
 - **Semantic memory** — remembers past conversations using vector similarity search (SQLite-backed, no external DB)
 - **Multi-provider LLM** — GitHub Copilot out of the box, plus any OpenAI-compatible API (OpenAI, Ollama, etc.)
 - **Agentic tool execution** — HTTP requests, file I/O, git inspection, shell commands
-- **Approval workflow** — privileged and dangerous tools require explicit `/approve` before execution
+- **Approval workflow** — manual approvals by default, with per-chat `/approval auto` and setup-time full-access mode
 - **Security by default** — allowlist-based access control, audit trail, secret redaction, shell disabled unless configured
 - **Job scheduler** — cron-based background tasks
 - **Plugin system** — extend capabilities with your own Rust plugins
@@ -102,13 +102,18 @@ Switch to it in Telegram chat:
 
 ```toml
 [tools]
-enabled_tools                  = []     # empty = all non-dangerous tools
-disabled_tools                 = []
-require_approval_for_privileged = true  # http_post, etc. need /approve
-require_approval_for_dangerous  = true  # shell needs /approve
-max_execution_seconds          = 30
-shell_allowlist                = []     # empty = shell disabled entirely
+enabled_tools                   = []      # empty = all registered tools except explicitly disabled
+disabled_tools                  = []
+require_approval_for_privileged = true    # set false to execute privileged tools immediately
+require_approval_for_dangerous  = true    # set false to execute dangerous tools immediately
+max_execution_seconds           = 30
+shell_allowlist                 = []      # empty = shell disabled entirely
 ```
+
+Approval behavior:
+- `/approval manual` keeps explicit approve/deny flow for pending actions.
+- `/approval auto` auto-approves pending actions for that chat session.
+- During `unly setup`, selecting full access disables approval prompts globally in config.
 
 **Built-in tools and their risk level:**
 
@@ -158,8 +163,9 @@ For the full configuration reference, see [docs/setup.md](docs/setup.md).
 | `/models` | All | List available models |
 | `/model <name>` | All | Switch to a different model |
 | `/provider <name>` | All | Switch to a different provider |
-| `/approve` | All | Approve a pending tool call |
-| `/deny` | All | Deny a pending tool call |
+| `/approve` | All | Approve pending tool calls (manual mode) |
+| `/deny` | All | Deny pending tool calls (manual mode) |
+| `/approval <manual\\|auto>` | All | Switch per-chat approval mode |
 | `/reset` | All | Clear conversation context |
 | `/memory list` | All | Show stored memory entries |
 | `/memory prune` | All | Delete old memory entries |
@@ -203,6 +209,11 @@ Telegram user
   → AuditLogger.log(event)
   → send reply to user
 ```
+
+Telegram formatting:
+- Messages are sent in plain text by default.
+- Short assistant responses are also attempted with Telegram HTML entity parsing.
+- If parsing fails, delivery falls back to plain text automatically.
 
 For a deeper dive, see:
 - [docs/architecture.md](docs/architecture.md) — full crate descriptions and technology choices

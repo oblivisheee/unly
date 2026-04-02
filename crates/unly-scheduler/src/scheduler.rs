@@ -17,8 +17,14 @@ use unly_db::{
 use crate::job::JobDefinition;
 
 /// Callback type for job execution.
-pub type JobCallback =
-    Arc<dyn Fn(serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<String, String>> + Send>> + Send + Sync>;
+pub type JobCallback = Arc<
+    dyn Fn(
+            serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<String, String>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// The scheduler manages cron jobs and dispatches them at the right time.
 pub struct Scheduler {
@@ -39,7 +45,10 @@ impl Scheduler {
     /// Register a job definition with a callback.
     pub async fn register(&self, job: JobDefinition, callback: JobCallback) {
         info!("registering job: {} ({})", job.name, job.id);
-        self.jobs.write().await.insert(job.id.clone(), (job.clone(), callback));
+        self.jobs
+            .write()
+            .await
+            .insert(job.id.clone(), (job.clone(), callback));
 
         // Persist to database.
         let now = Utc::now();
@@ -89,7 +98,9 @@ impl Scheduler {
                     let should_run = match Schedule::from_str(cron_expr) {
                         Ok(schedule) => {
                             let upcoming = schedule.upcoming(Utc).next();
-                            upcoming.map(|next| (next - now).num_seconds().abs() < 60).unwrap_or(false)
+                            upcoming
+                                .map(|next| (next - now).num_seconds().abs() < 60)
+                                .unwrap_or(false)
                         }
                         Err(e) => {
                             warn!("invalid cron expression for job {}: {}", id, e);

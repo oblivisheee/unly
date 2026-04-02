@@ -1,7 +1,7 @@
+use crate::error::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use crate::error::Result;
 
 /// Classification of tool risk level.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,7 +38,11 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
-    pub fn success(tool_call_id: impl Into<String>, stdout: impl Into<String>, duration_ms: u64) -> Self {
+    pub fn success(
+        tool_call_id: impl Into<String>,
+        stdout: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
         Self {
             tool_call_id: tool_call_id.into(),
             stdout: stdout.into(),
@@ -50,7 +54,11 @@ impl ToolResult {
         }
     }
 
-    pub fn error(tool_call_id: impl Into<String>, message: impl Into<String>, duration_ms: u64) -> Self {
+    pub fn error(
+        tool_call_id: impl Into<String>,
+        message: impl Into<String>,
+        duration_ms: u64,
+    ) -> Self {
         Self {
             tool_call_id: tool_call_id.into(),
             stdout: String::new(),
@@ -77,9 +85,5 @@ pub struct ToolContext {
 pub trait Tool: Send + Sync {
     fn schema(&self) -> ToolSchema;
 
-    async fn execute(
-        &self,
-        args: Value,
-        ctx: &ToolContext,
-    ) -> Result<ToolResult>;
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult>;
 }

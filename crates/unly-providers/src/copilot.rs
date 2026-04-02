@@ -17,7 +17,7 @@ use tracing::{debug, info};
 
 use unly_core::{
     model::{
-        ChatRequest, ChatResponse, ChatMessageContent, ContentPart, EmbeddingRequest,
+        ChatMessageContent, ChatRequest, ChatResponse, ContentPart, EmbeddingRequest,
         EmbeddingResponse, FunctionCall, Model, StreamChunk, ToolCall, Usage,
     },
     provider::{Provider, TokenStream},
@@ -96,8 +96,7 @@ impl CopilotProvider {
         if let Some(parent) = self.token_cache_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(token)
-            .map_err(std::io::Error::other)?;
+        let content = serde_json::to_string_pretty(token).map_err(std::io::Error::other)?;
         std::fs::write(&self.token_cache_path, content)?;
         // Set restrictive file permissions on Unix.
         #[cfg(unix)]
@@ -144,7 +143,10 @@ impl CopilotProvider {
     }
 
     /// Poll the GitHub token endpoint during the device flow.
-    pub async fn poll_device_flow(&self, state: &DeviceFlowState) -> ProviderResult<DevicePollResult> {
+    pub async fn poll_device_flow(
+        &self,
+        state: &DeviceFlowState,
+    ) -> ProviderResult<DevicePollResult> {
         let response = self
             .client
             .post(GITHUB_TOKEN_URL)
@@ -208,7 +210,9 @@ impl CopilotProvider {
         let github_token = {
             let guard = self.github_token.read();
             guard.clone().ok_or_else(|| {
-                ProviderError::Auth("not authenticated — run `unly provider login copilot`".to_string())
+                ProviderError::Auth(
+                    "not authenticated — run `unly provider login copilot`".to_string(),
+                )
             })?
         };
 
@@ -249,7 +253,8 @@ impl CopilotProvider {
             .get("expires_at")
             .and_then(|v| v.as_i64())
             .map(|ts| {
-                DateTime::from_timestamp(ts, 0).unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(25))
+                DateTime::from_timestamp(ts, 0)
+                    .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(25))
             })
             .unwrap_or_else(|| Utc::now() + chrono::Duration::minutes(25));
 
@@ -354,6 +359,7 @@ impl Provider for CopilotProvider {
             tool_calling: true,
             streaming: true,
             vision: true,
+            reasoning: true,
         }
     }
 
@@ -672,7 +678,9 @@ pub(crate) fn parse_openai_models(body: &serde_json::Value, provider: &str) -> V
         .unwrap_or_default()
 }
 
-pub(crate) fn parse_chat_response(body: serde_json::Value) -> std::result::Result<ChatResponse, String> {
+pub(crate) fn parse_chat_response(
+    body: serde_json::Value,
+) -> std::result::Result<ChatResponse, String> {
     let id = body
         .get("id")
         .and_then(|v| v.as_str())

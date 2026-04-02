@@ -99,21 +99,16 @@ impl ToolRegistry {
         }
 
         let max_secs = self.policy.max_execution_seconds;
-        let _permit = self.semaphore.acquire().await.map_err(|e| {
-            Error::Tool {
-                tool: name.to_string(),
-                message: format!("semaphore error: {}", e),
-            }
+        let _permit = self.semaphore.acquire().await.map_err(|e| Error::Tool {
+            tool: name.to_string(),
+            message: format!("semaphore error: {}", e),
         })?;
 
         debug!(tool = %name, "executing tool");
         let start = Instant::now();
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(max_secs),
-            tool.execute(args, &ctx),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(max_secs), tool.execute(args, &ctx)).await;
 
         match result {
             Ok(Ok(mut tool_result)) => {

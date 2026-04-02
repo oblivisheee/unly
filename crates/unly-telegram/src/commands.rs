@@ -9,22 +9,20 @@ pub enum Command {
     Help,
     #[command(description = "Show current status and health.")]
     Status,
-    #[command(description = "List available models.")]
-    Models,
     #[command(description = "Set the active model. Usage: /model <model-id>")]
     Model(String),
     #[command(description = "Set the active provider. Usage: /provider <name>")]
     Provider(String),
+    #[command(description = "Show subagent capabilities and limits.")]
+    Subagent,
+    #[command(description = "Show active subagents and statuses.")]
+    Subagents,
     #[command(description = "Approve a pending tool action.")]
     Approve,
     #[command(description = "Deny a pending tool action.")]
     Deny,
+    #[command(description = "Set approval mode. Usage: /approval <manual|auto>")]
+    Approval(String),
     #[command(description = "Reset the conversation context.")]
     Reset,
-    #[command(description = "Show memory entries for this chat. (Admin)")]
-    Memory,
-    #[command(description = "Show recent audit log entries. (Admin)")]
-    Audit,
-    #[command(description = "Show scheduler job status. (Admin)")]
-    Jobs,
 }

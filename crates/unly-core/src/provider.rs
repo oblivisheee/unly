@@ -1,9 +1,11 @@
-use async_trait::async_trait;
-use std::pin::Pin;
-use futures::Stream;
 use crate::error::Result;
-use crate::model::{ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Model, StreamChunk};
+use crate::model::{
+    ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Model, StreamChunk,
+};
 use crate::types::{HealthReport, ProviderCapabilities};
+use async_trait::async_trait;
+use futures::Stream;
+use std::pin::Pin;
 
 /// Boxed token stream returned by [`Provider::chat_stream`].
 pub type TokenStream = Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>;

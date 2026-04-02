@@ -4,12 +4,7 @@ use std::sync::Arc;
 use tracing::debug;
 use uuid::Uuid;
 
-use unly_core::{
-    model::EmbeddingRequest,
-    provider::Provider,
-    types::Timestamp,
-    Result,
-};
+use unly_core::{model::EmbeddingRequest, provider::Provider, types::Timestamp, Result};
 use unly_db::{
     repo::memory::{MemoryEntryRow, MemoryRepo},
     Database,
@@ -116,8 +111,7 @@ impl MemoryStore {
             embedding: embedding_bytes,
             source_type: source_type.clone(),
             source_id: source_id.clone(),
-            metadata: serde_json::to_string(&metadata)
-                .unwrap_or_else(|_| "{}".to_string()),
+            metadata: serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string()),
             created_at: now,
             expires_at,
         };
@@ -156,7 +150,9 @@ impl MemoryStore {
             .embeddings
             .into_iter()
             .next()
-            .ok_or_else(|| unly_core::Error::Memory("no embedding returned for query".to_string()))?;
+            .ok_or_else(|| {
+                unly_core::Error::Memory("no embedding returned for query".to_string())
+            })?;
 
         // Load all entries for this scope.
         let repo = MemoryRepo::new(self.db.conn());

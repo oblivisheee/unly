@@ -38,6 +38,7 @@ pub struct ProviderCapabilities {
     pub tool_calling: bool,
     pub streaming: bool,
     pub vision: bool,
+    pub reasoning: bool,
 }
 
 impl Default for ProviderCapabilities {
@@ -48,6 +49,7 @@ impl Default for ProviderCapabilities {
             tool_calling: false,
             streaming: false,
             vision: false,
+            reasoning: false,
         }
     }
 }

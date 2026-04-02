@@ -3,11 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use unly_core::{
-    provider::Provider,
-    types::HealthReport,
-    Error, Result,
-};
+use unly_core::{provider::Provider, types::HealthReport, Error, Result};
 
 /// Registry that holds all configured LLM providers.
 #[derive(Clone)]
@@ -41,8 +37,7 @@ impl ProviderRegistry {
     /// Get the default provider.
     pub fn default_provider(&self) -> Result<Arc<dyn Provider>> {
         let name = self.default_provider.read().clone();
-        self.get(&name)
-            .ok_or(Error::ProviderNotFound(name))
+        self.get(&name).ok_or(Error::ProviderNotFound(name))
     }
 
     /// Get the configured default model name.
@@ -57,8 +52,7 @@ impl ProviderRegistry {
 
     /// Run health checks on all providers.
     pub async fn health_all(&self) -> Vec<HealthReport> {
-        let providers: Vec<Arc<dyn Provider>> =
-            self.providers.read().values().cloned().collect();
+        let providers: Vec<Arc<dyn Provider>> = self.providers.read().values().cloned().collect();
         let mut reports = Vec::new();
         for p in providers {
             let report = p.health().await;
