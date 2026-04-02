@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 unly-core.workspace = true
+unly-config.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
 thiserror.workspace = true

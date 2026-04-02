@@ -4,13 +4,14 @@
 //! OpenAI directly, Azure OpenAI, Ollama, LM Studio, Together AI, etc.
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 use std::time::Duration;
 use tracing::debug;
 
 use unly_core::{
-    model::{ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Model},
-    provider::Provider,
+    model::{ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Model, StreamChunk},
+    provider::{Provider, TokenStream},
     types::{HealthReport, ProviderCapabilities},
     Error, Result,
 };
@@ -55,7 +56,7 @@ impl OpenAiCompatProvider {
         }
     }
 
-    fn build_chat_body(&self, request: &ChatRequest) -> serde_json::Value {
+    fn build_chat_body(&self, request: &ChatRequest, stream: bool) -> serde_json::Value {
         let messages: Vec<serde_json::Value> = request
             .messages
             .iter()
@@ -90,7 +91,7 @@ impl OpenAiCompatProvider {
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": messages,
-            "stream": request.stream,
+            "stream": stream,
         });
         if let Some(temp) = request.temperature {
             body["temperature"] = serde_json::json!(temp);
@@ -120,7 +121,7 @@ impl Provider for OpenAiCompatProvider {
             chat: true,
             embeddings: true,
             tool_calling: true,
-            streaming: false,
+            streaming: true,
             vision: false,
         }
     }
@@ -168,7 +169,7 @@ impl Provider for OpenAiCompatProvider {
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
         let url = format!("{}/chat/completions", self.base_url);
-        let body = self.build_chat_body(&request);
+        let body = self.build_chat_body(&request, false);
 
         debug!(provider = %self.name, model = %request.model, "sending chat request");
 
@@ -196,6 +197,117 @@ impl Provider for OpenAiCompatProvider {
             .map_err(|e| Error::provider(&self.name, e.to_string()))?;
 
         parse_chat_response(resp_body).map_err(|e| Error::provider(&self.name, e))
+    }
+
+    async fn chat_stream(&self, request: ChatRequest) -> Result<TokenStream> {
+        let url = format!("{}/chat/completions", self.base_url);
+        let body = self.build_chat_body(&request, true);
+        let provider_name = self.name.clone();
+        let model_name = request.model.clone();
+
+        debug!(provider = %self.name, model = %request.model, "sending streaming chat request");
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::provider(&self.name, e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::provider(
+                &self.name,
+                format!("HTTP {} — {}", status, text),
+            ));
+        }
+
+        // Parse Server-Sent Events (SSE) from the response body.
+        let byte_stream = response.bytes_stream();
+
+        let stream = futures::stream::unfold(
+            (byte_stream, String::new(), String::new(), provider_name.clone(), model_name.clone()),
+            |(mut byte_stream, mut buf, mut accumulated, pname, mname)| async move {
+                loop {
+                    // Try to find a complete SSE line in the buffer first.
+                    if let Some(pos) = buf.find('\n') {
+                        let line = buf[..pos].trim_end_matches('\r').to_string();
+                        buf = buf[pos + 1..].to_string();
+
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            let data = data.trim();
+                            if data == "[DONE]" {
+                                // Stream finished — emit Done with accumulated text.
+                                let resp = ChatResponse {
+                                    id: String::new(),
+                                    model: mname.clone(),
+                                    content: Some(accumulated.clone()),
+                                    tool_calls: None,
+                                    finish_reason: Some("stop".to_string()),
+                                    usage: None,
+                                };
+                                return Some((
+                                    Ok(StreamChunk::Done(resp)),
+                                    (byte_stream, buf, accumulated, pname, mname),
+                                ));
+                            }
+
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                let delta = json
+                                    .pointer("/choices/0/delta/content")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !delta.is_empty() {
+                                    accumulated.push_str(&delta);
+                                    return Some((
+                                        Ok(StreamChunk::Delta(delta)),
+                                        (byte_stream, buf, accumulated, pname, mname),
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Need more bytes from the network.
+                    match byte_stream.next().await {
+                        Some(Ok(bytes)) => {
+                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                        }
+                        Some(Err(e)) => {
+                            return Some((
+                                Err(Error::provider(&pname, e.to_string())),
+                                (byte_stream, buf, accumulated, pname, mname),
+                            ));
+                        }
+                        None => {
+                            // Connection closed without [DONE] — return what we have.
+                            if !accumulated.is_empty() {
+                                let resp = ChatResponse {
+                                    id: String::new(),
+                                    model: mname.clone(),
+                                    content: Some(accumulated.clone()),
+                                    tool_calls: None,
+                                    finish_reason: Some("stop".to_string()),
+                                    usage: None,
+                                };
+                                return Some((
+                                    Ok(StreamChunk::Done(resp)),
+                                    (byte_stream, buf, accumulated, pname, mname),
+                                ));
+                            }
+                            return None;
+                        }
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
     }
 
     async fn embeddings(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
@@ -247,3 +359,4 @@ impl Provider for OpenAiCompatProvider {
         }
     }
 }
+

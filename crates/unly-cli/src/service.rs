@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use unly_agent::{AgentRuntime, AgentRuntimeConfig};
 use unly_audit::AuditLogger;
-use unly_config::AppConfig;
+use unly_config::{AppConfig, workspace};
 use unly_providers::{
     copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
 };
@@ -82,6 +82,37 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     Arc::new(registry)
 }
 
+/// Load the agent system prompt from IDENTITY.md + BOOT.md.
+///
+/// If these files don't exist in the workspace, the bundled defaults are used.
+/// This function also writes the default files if they are absent, so the user
+/// can discover and customise them.
+pub fn load_system_prompt() -> String {
+    let id_path = workspace::identity_path();
+    let boot_path = workspace::boot_path();
+
+    // Write defaults if the files don't exist yet.
+    if !id_path.exists() {
+        if let Some(parent) = id_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&id_path, workspace::DEFAULT_IDENTITY);
+    }
+    if !boot_path.exists() {
+        if let Some(parent) = boot_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&boot_path, workspace::DEFAULT_BOOT);
+    }
+
+    let identity = std::fs::read_to_string(&id_path)
+        .unwrap_or_else(|_| workspace::DEFAULT_IDENTITY.to_string());
+    let boot = std::fs::read_to_string(&boot_path)
+        .unwrap_or_else(|_| workspace::DEFAULT_BOOT.to_string());
+
+    format!("{}\n\n---\n\n{}", identity.trim(), boot.trim())
+}
+
 /// Build the agent runtime from config.
 pub fn build_runtime(
     config: &AppConfig,
@@ -89,9 +120,11 @@ pub fn build_runtime(
     tool_registry: Arc<ToolRegistry>,
     audit: Option<Arc<AuditLogger>>,
 ) -> Arc<AgentRuntime> {
+    let system_prompt = load_system_prompt();
+
     Arc::new(AgentRuntime::new(
         AgentRuntimeConfig {
-            system_prompt: config.agent.system_prompt.clone(),
+            system_prompt,
             default_provider: config.providers.default_provider.clone(),
             default_model: config.providers.default_model.clone(),
             max_tool_calls_per_turn: config.agent.max_tool_calls_per_turn,

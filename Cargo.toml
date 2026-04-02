@@ -39,9 +39,10 @@ toml = "1"
 # HTTP
 reqwest = { version = "0.13", features = ["json", "stream", "rustls", "form"], default-features = false }
 
-# Database — SeaORM with SQLite backend
+# Database — SeaORM with SQLite and PostgreSQL backends
 sea-orm = { version = "1", features = [
     "sqlx-sqlite",
+    "sqlx-postgres",
     "runtime-tokio-rustls",
     "macros",
     "with-chrono",
@@ -50,6 +51,7 @@ sea-orm = { version = "1", features = [
 ] }
 sea-orm-migration = { version = "1", features = [
     "sqlx-sqlite",
+    "sqlx-postgres",
     "runtime-tokio-rustls",
 ] }
 
@@ -90,6 +92,9 @@ regex = "1"
 url = { version = "2", features = ["serde"] }
 rand = "0.8"
 parking_lot = "0.12"
+
+# Interactive CLI prompts
+dialoguer = "0.11"
 
 # Internal crates
 unly-core = { path = "crates/unly-core" }

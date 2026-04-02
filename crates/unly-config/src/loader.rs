@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::config::AppConfig;
 use crate::error::ConfigError;
+use crate::workspace;
 
 /// Load configuration from a TOML file, with environment variable overrides.
 ///
@@ -40,6 +41,18 @@ pub fn load_config(config_path: impl AsRef<Path>) -> Result<AppConfig, ConfigErr
 /// Load a default config (useful for first-run / onboarding).
 pub fn default_config() -> AppConfig {
     AppConfig::default()
+}
+
+/// Return the path that should be used as the default config file.
+///
+/// Resolution order:
+/// 1. `$UNLY_CONFIG` env var
+/// 2. `~/.unly/config.toml` (workspace default)
+pub fn resolve_default_config_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("UNLY_CONFIG") {
+        return std::path::PathBuf::from(p);
+    }
+    workspace::default_config_path()
 }
 
 fn apply_env_overrides(config: &mut AppConfig) {

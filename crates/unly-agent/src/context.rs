@@ -21,6 +21,17 @@ pub struct AgentContext {
     pub subagent_depth: u32,
     pub pending_approvals: Vec<PendingApproval>,
     pub created_at: Timestamp,
+    /// Accumulated reasoning/tool-use steps (Mode 1 — never shown to the user).
+    pub thinking_log: Vec<ThinkingStep>,
+}
+
+/// A step recorded in the agent's inner reasoning log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingStep {
+    /// Short label for the step type (e.g. "tool_call", "tool_result", "reasoning").
+    pub kind: String,
+    /// Human-readable summary of the step.
+    pub summary: String,
 }
 
 /// A pending tool call that awaits user approval.
@@ -54,6 +65,7 @@ impl AgentContext {
             subagent_depth: 0,
             pending_approvals: Vec::new(),
             created_at: unly_core::types::now(),
+            thinking_log: Vec::new(),
         }
     }
 
@@ -73,6 +85,14 @@ impl AgentContext {
     /// Push a message onto the context.
     pub fn push_message(&mut self, msg: ChatMessage) {
         self.messages.push(msg);
+    }
+
+    /// Record a step in the internal thinking log.
+    pub fn log_thinking(&mut self, kind: impl Into<String>, summary: impl Into<String>) {
+        self.thinking_log.push(ThinkingStep {
+            kind: kind.into(),
+            summary: summary.into(),
+        });
     }
 
     /// Trim messages to stay within a context window.
