@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::StreamExt;
 use parking_lot::RwLock;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -17,9 +18,9 @@ use tracing::{debug, info};
 use unly_core::{
     model::{
         ChatRequest, ChatResponse, ChatMessageContent, ContentPart, EmbeddingRequest,
-        EmbeddingResponse, FunctionCall, Model, ToolCall, Usage,
+        EmbeddingResponse, FunctionCall, Model, StreamChunk, ToolCall, Usage,
     },
-    provider::Provider,
+    provider::{Provider, TokenStream},
     types::{HealthReport, ProviderCapabilities},
     Error, Result,
 };
@@ -351,7 +352,7 @@ impl Provider for CopilotProvider {
             chat: true,
             embeddings: true,
             tool_calling: true,
-            streaming: false, // streaming parsing not yet wired
+            streaming: true,
             vision: true,
         }
     }
@@ -431,6 +432,124 @@ impl Provider for CopilotProvider {
             .map_err(|e| Error::provider("copilot", e.to_string()))?;
 
         parse_chat_response(body).map_err(|e| Error::provider("copilot", e))
+    }
+
+    async fn chat_stream(&self, request: ChatRequest) -> Result<TokenStream> {
+        let token = self
+            .get_copilot_token()
+            .await
+            .map_err(|e| Error::provider("copilot", e.to_string()))?;
+
+        let url = format!("{}/chat/completions", self.copilot_api_url);
+        // Build body with stream: true (override whatever the caller set).
+        let mut body = Self::build_chat_body(&request);
+        body["stream"] = serde_json::json!(true);
+        let model_name = request.model.clone();
+
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .header("Content-Type", "application/json")
+            .header("Copilot-Integration-Id", "vscode-chat")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| Error::provider("copilot", e.to_string()))?;
+
+        if response.status() == 401 {
+            return Err(Error::Auth(
+                "Copilot token rejected — please re-authenticate".to_string(),
+            ));
+        }
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(Error::provider(
+                "copilot",
+                format!("HTTP {} — {}", status, text),
+            ));
+        }
+
+        let byte_stream = response.bytes_stream();
+
+        let stream = futures::stream::unfold(
+            (byte_stream, String::new(), String::new(), model_name),
+            |(mut byte_stream, mut buf, mut accumulated, mname)| async move {
+                loop {
+                    if let Some(pos) = buf.find('\n') {
+                        let line = buf[..pos].trim_end_matches('\r').to_string();
+                        buf = buf[pos + 1..].to_string();
+
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            let data = data.trim();
+                            if data == "[DONE]" {
+                                let resp = ChatResponse {
+                                    id: String::new(),
+                                    model: mname.clone(),
+                                    content: Some(accumulated.clone()),
+                                    tool_calls: None,
+                                    finish_reason: Some("stop".to_string()),
+                                    usage: None,
+                                };
+                                return Some((
+                                    Ok(StreamChunk::Done(resp)),
+                                    (byte_stream, buf, accumulated, mname),
+                                ));
+                            }
+
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                let delta = json
+                                    .pointer("/choices/0/delta/content")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if !delta.is_empty() {
+                                    accumulated.push_str(&delta);
+                                    return Some((
+                                        Ok(StreamChunk::Delta(delta)),
+                                        (byte_stream, buf, accumulated, mname),
+                                    ));
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    match byte_stream.next().await {
+                        Some(Ok(bytes)) => {
+                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                        }
+                        Some(Err(e)) => {
+                            return Some((
+                                Err(Error::provider("copilot", e.to_string())),
+                                (byte_stream, buf, accumulated, mname),
+                            ));
+                        }
+                        None => {
+                            if !accumulated.is_empty() {
+                                let resp = ChatResponse {
+                                    id: String::new(),
+                                    model: mname.clone(),
+                                    content: Some(accumulated.clone()),
+                                    tool_calls: None,
+                                    finish_reason: Some("stop".to_string()),
+                                    usage: None,
+                                };
+                                return Some((
+                                    Ok(StreamChunk::Done(resp)),
+                                    (byte_stream, buf, accumulated, mname),
+                                ));
+                            }
+                            return None;
+                        }
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
     }
 
     async fn embeddings(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {

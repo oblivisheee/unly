@@ -32,3 +32,4 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 uuid.workspace = true
 chrono.workspace = true
+dialoguer.workspace = true

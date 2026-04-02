@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::workspace;
+
 /// Top-level application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -43,13 +45,27 @@ impl Default for TelegramConfig {
     }
 }
 
+/// Database backend selector.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DbType {
+    #[default]
+    Sqlite,
+    Postgres,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
-    /// Path to the SQLite database file.
+    /// Database backend: "sqlite" (default) or "postgres".
+    pub db_type: DbType,
+    /// Path to the SQLite database file (only used when db_type = "sqlite").
     pub path: PathBuf,
+    /// PostgreSQL connection URL (only used when db_type = "postgres").
+    /// Example: "postgresql://user:pass@localhost:5432/unly"
+    pub postgres_url: Option<String>,
     /// Maximum connection pool size.
     pub max_connections: u32,
-    /// Journal mode (WAL recommended for production).
+    /// Journal mode (WAL recommended for SQLite production).
     pub journal_mode: String,
     /// Whether to run migrations on startup.
     pub auto_migrate: bool,
@@ -58,7 +74,9 @@ pub struct DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            path: PathBuf::from("data/unly.sqlite"),
+            db_type: DbType::Sqlite,
+            path: workspace::default_db_path(),
+            postgres_url: None,
             max_connections: 5,
             journal_mode: "WAL".to_string(),
             auto_migrate: true,
@@ -140,7 +158,7 @@ impl Default for CopilotConfig {
         Self {
             enabled: true,
             github_client_id: "Iv1.b507a08c87ecfe98".to_string(), // GitHub Copilot CLI client ID
-            token_cache_path: PathBuf::from("data/github_token.json"),
+            token_cache_path: workspace::default_token_cache_path(),
             github_api_url: "https://api.github.com".to_string(),
             copilot_api_url: "https://api.githubcopilot.com".to_string(),
         }
@@ -205,8 +223,6 @@ impl Default for ToolsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
-    /// System prompt prefix injected into every conversation.
-    pub system_prompt: String,
     /// Maximum depth for nested subagent spawning.
     pub max_subagent_depth: u32,
     /// Maximum number of concurrent subagents.
@@ -222,7 +238,6 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            system_prompt: "You are Unly, a helpful personal AI agent. You have access to tools and can help with a wide variety of tasks. Be precise, helpful, and safe.".to_string(),
             max_subagent_depth: 3,
             max_concurrent_subagents: 4,
             subagent_token_budget: 8192,
@@ -270,7 +285,7 @@ pub struct PluginsConfig {
 impl Default for PluginsConfig {
     fn default() -> Self {
         Self {
-            plugins_dir: PathBuf::from("plugins"),
+            plugins_dir: workspace::workspace_dir().join("plugins"),
             allow_unknown: false,
             enabled: Vec::new(),
             disabled: Vec::new(),

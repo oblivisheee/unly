@@ -115,3 +115,12 @@ pub struct EmbeddingResponse {
     pub model: String,
     pub usage: Option<Usage>,
 }
+
+/// A single streaming token chunk from an LLM provider.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// A new text delta (partial token).
+    Delta(String),
+    /// The stream has finished.  The full accumulated response is included.
+    Done(ChatResponse),
+}
