@@ -1,20 +1,21 @@
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
+use sea_orm::{ConnectOptions, Database as SeaDatabase, DatabaseConnection};
+use sea_orm_migration::MigratorTrait;
 use std::path::Path;
+use std::time::Duration;
 use tracing::info;
 
-use crate::error::DbResult;
+use crate::error::{DbError, DbResult};
+use crate::migration::Migrator;
 
-/// Type alias for the SQLite connection pool.
-pub type DatabasePool = SqlitePool;
-
-/// Database handle providing access to the connection pool and migrations.
+/// Database handle wrapping a SeaORM `DatabaseConnection`.
 #[derive(Clone, Debug)]
 pub struct Database {
-    pool: DatabasePool,
+    conn: DatabaseConnection,
 }
 
 impl Database {
-    /// Connect to the SQLite database at the given path and run migrations.
+    /// Open (or create) the SQLite database and optionally run all pending
+    /// migrations.
     pub async fn connect(
         db_path: impl AsRef<Path>,
         max_connections: u32,
@@ -24,30 +25,36 @@ impl Database {
 
         // Ensure the parent directory exists.
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                crate::error::DbError::Config(format!(
-                    "failed to create database directory {}: {}",
-                    parent.display(),
-                    e
-                ))
-            })?;
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    DbError::Config(format!(
+                        "failed to create database directory {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
         }
 
         let db_url = format!("sqlite://{}?mode=rwc", path.display());
-
         info!("connecting to database at {}", path.display());
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(max_connections)
-            .connect(&db_url)
-            .await?;
+        let mut opts = ConnectOptions::new(db_url);
+        opts.max_connections(max_connections)
+            .min_connections(1)
+            .connect_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(300))
+            .sqlx_logging(false);
 
-        // Enable WAL mode and foreign keys.
-        sqlx::query("PRAGMA journal_mode=WAL").execute(&pool).await?;
-        sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
-        sqlx::query("PRAGMA synchronous=NORMAL").execute(&pool).await?;
+        let conn = SeaDatabase::connect(opts).await?;
 
-        let db = Self { pool };
+        // Enable WAL mode and foreign keys via raw statement (SQLite pragmas).
+        use sea_orm::ConnectionTrait;
+        conn.execute_unprepared("PRAGMA journal_mode=WAL").await?;
+        conn.execute_unprepared("PRAGMA foreign_keys=ON").await?;
+        conn.execute_unprepared("PRAGMA synchronous=NORMAL").await?;
+
+        let db = Self { conn };
 
         if auto_migrate {
             db.migrate().await?;
@@ -56,32 +63,28 @@ impl Database {
         Ok(db)
     }
 
-    /// Run all pending database migrations.
+    /// Run all pending SeaORM migrations.
     pub async fn migrate(&self) -> DbResult<()> {
         info!("running database migrations");
-        // Use runtime migration from embedded SQL.
-        let migrator = sqlx::migrate!("../../migrations");
-        migrator
-            .run(&self.pool)
-            .await
-            .map_err(crate::error::DbError::Migration)?;
+        Migrator::up(&self.conn, None).await?;
         info!("database migrations complete");
         Ok(())
     }
 
-    /// Get a reference to the underlying connection pool.
-    pub fn pool(&self) -> &DatabasePool {
-        &self.pool
+    /// Get a reference to the underlying SeaORM `DatabaseConnection`.
+    pub fn conn(&self) -> &DatabaseConnection {
+        &self.conn
     }
 
-    /// Close the database connection pool.
-    pub async fn close(&self) {
-        self.pool.close().await;
+    /// Close the database connection gracefully.
+    pub async fn close(self) {
+        self.conn.close().await.ok();
     }
 
-    /// Check database connectivity.
+    /// Verify the database is reachable.
     pub async fn health_check(&self) -> DbResult<()> {
-        sqlx::query("SELECT 1").fetch_one(&self.pool).await?;
+        use sea_orm::ConnectionTrait;
+        self.conn.execute_unprepared("SELECT 1").await?;
         Ok(())
     }
 }

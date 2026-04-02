@@ -314,7 +314,7 @@ impl TelegramBot {
                     bot.send_message(msg.chat.id, "❌ Admin only.").await?;
                     return Ok(());
                 }
-                let repo = unly_db::repo::audit::AuditRepo::new(self.db.pool());
+                let repo = unly_db::repo::audit::AuditRepo::new(self.db.conn());
                 match repo.list_recent(10).await {
                     Ok(rows) => {
                         let mut lines = vec!["📋 **Recent Audit Events**".to_string()];
@@ -343,7 +343,7 @@ impl TelegramBot {
                     bot.send_message(msg.chat.id, "❌ Admin only.").await?;
                     return Ok(());
                 }
-                let repo = unly_db::repo::job::JobRepo::new(self.db.pool());
+                let repo = unly_db::repo::job::JobRepo::new(self.db.conn());
                 match repo.list_enabled().await {
                     Ok(jobs) => {
                         if jobs.is_empty() {
@@ -433,7 +433,7 @@ impl TelegramBot {
             .await?;
 
         // Persist the message.
-        let chat_repo = unly_db::repo::chat::ChatRepo::new(self.db.pool());
+        let chat_repo = unly_db::repo::chat::ChatRepo::new(self.db.conn());
         let chat_row = chat_repo
             .get_or_create_chat(
                 tg_chat_id,

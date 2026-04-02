@@ -121,7 +121,7 @@ impl MemoryStore {
             expires_at,
         };
 
-        let repo = MemoryRepo::new(self.db.pool());
+        let repo = MemoryRepo::new(self.db.conn());
         repo.insert(&row)
             .await
             .map_err(|e| unly_core::Error::Memory(e.to_string()))?;
@@ -158,7 +158,7 @@ impl MemoryStore {
             .ok_or_else(|| unly_core::Error::Memory("no embedding returned for query".to_string()))?;
 
         // Load all entries for this scope.
-        let repo = MemoryRepo::new(self.db.pool());
+        let repo = MemoryRepo::new(self.db.conn());
         let rows = repo
             .list_by_scope(query.scope.scope_type(), query.scope.scope_id())
             .await
@@ -212,7 +212,7 @@ impl MemoryStore {
 
     /// Delete expired memory entries.
     pub async fn prune_expired(&self) -> Result<u64> {
-        let repo = MemoryRepo::new(self.db.pool());
+        let repo = MemoryRepo::new(self.db.conn());
         repo.delete_expired()
             .await
             .map_err(|e| unly_core::Error::Memory(e.to_string()))
@@ -220,7 +220,7 @@ impl MemoryStore {
 
     /// Delete a memory entry by ID.
     pub async fn delete(&self, id: &str) -> Result<bool> {
-        let repo = MemoryRepo::new(self.db.pool());
+        let repo = MemoryRepo::new(self.db.conn());
         repo.delete_by_id(id)
             .await
             .map_err(|e| unly_core::Error::Memory(e.to_string()))
@@ -228,7 +228,7 @@ impl MemoryStore {
 
     /// Count entries for a scope.
     pub async fn count(&self, scope: &MemoryScope) -> Result<i64> {
-        let repo = MemoryRepo::new(self.db.pool());
+        let repo = MemoryRepo::new(self.db.conn());
         repo.count_by_scope(scope.scope_type(), scope.scope_id())
             .await
             .map_err(|e| unly_core::Error::Memory(e.to_string()))

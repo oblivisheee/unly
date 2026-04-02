@@ -1,11 +1,17 @@
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
-use crate::error::DbResult;
+use crate::{
+    entity::{chat, message},
+    error::DbResult,
+};
 
-/// A row in the chats table.
+/// Public chat row returned from the repository layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRow {
     pub id: String,
@@ -19,7 +25,7 @@ pub struct ChatRow {
     pub metadata: String,
 }
 
-/// A row in the messages table.
+/// Public message row returned from the repository layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageRow {
     pub id: String,
@@ -31,130 +37,115 @@ pub struct MessageRow {
     pub metadata: String,
 }
 
-pub struct ChatRepo<'a> {
-    pool: &'a SqlitePool,
-}
-
 fn parse_dt(s: &str) -> DateTime<Utc> {
-    chrono::DateTime::parse_from_rfc3339(s)
+    DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
-        .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-                .map(|ndt| ndt.and_utc())
-        })
         .unwrap_or_else(|_| Utc::now())
 }
 
+fn model_to_chat(m: chat::Model) -> ChatRow {
+    ChatRow {
+        id: m.id,
+        telegram_chat_id: m.telegram_chat_id,
+        title: m.title,
+        system_prompt: m.system_prompt,
+        provider: m.provider,
+        model: m.model,
+        created_at: parse_dt(&m.created_at),
+        updated_at: parse_dt(&m.updated_at),
+        metadata: m.metadata,
+    }
+}
+
+fn model_to_message(m: message::Model) -> MessageRow {
+    MessageRow {
+        id: m.id,
+        chat_id: m.chat_id,
+        user_id: m.user_id,
+        role: m.role,
+        content: m.content,
+        created_at: parse_dt(&m.created_at),
+        metadata: m.metadata,
+    }
+}
+
+pub struct ChatRepo<'a> {
+    conn: &'a DatabaseConnection,
+}
+
 impl<'a> ChatRepo<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
-        Self { pool }
-    }
-
-    fn row_to_chat(row: &sqlx::sqlite::SqliteRow) -> ChatRow {
-        let created_at: String = row.try_get("created_at").unwrap_or_default();
-        let updated_at: String = row.try_get("updated_at").unwrap_or_default();
-        ChatRow {
-            id: row.try_get("id").unwrap_or_default(),
-            telegram_chat_id: row.try_get("telegram_chat_id").ok(),
-            title: row.try_get("title").ok(),
-            system_prompt: row.try_get("system_prompt").ok(),
-            provider: row.try_get("provider").ok(),
-            model: row.try_get("model").ok(),
-            created_at: parse_dt(&created_at),
-            updated_at: parse_dt(&updated_at),
-            metadata: row.try_get("metadata").unwrap_or_else(|_| "{}".to_string()),
-        }
-    }
-
-    fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> MessageRow {
-        let created_at: String = row.try_get("created_at").unwrap_or_default();
-        MessageRow {
-            id: row.try_get("id").unwrap_or_default(),
-            chat_id: row.try_get("chat_id").unwrap_or_default(),
-            user_id: row.try_get("user_id").ok(),
-            role: row.try_get("role").unwrap_or_default(),
-            content: row.try_get("content").unwrap_or_default(),
-            created_at: parse_dt(&created_at),
-            metadata: row.try_get("metadata").unwrap_or_else(|_| "{}".to_string()),
-        }
+    pub fn new(conn: &'a DatabaseConnection) -> Self {
+        Self { conn }
     }
 
     pub async fn upsert(&self, row: &ChatRow) -> DbResult<()> {
-        let created_at = row.created_at.to_rfc3339();
-        let updated_at = row.updated_at.to_rfc3339();
-        sqlx::query(
-            r#"INSERT INTO chats (id, telegram_chat_id, title, system_prompt, provider, model, created_at, updated_at, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                telegram_chat_id = excluded.telegram_chat_id,
-                title = excluded.title,
-                system_prompt = excluded.system_prompt,
-                provider = excluded.provider,
-                model = excluded.model,
-                updated_at = excluded.updated_at,
-                metadata = excluded.metadata"#,
-        )
-        .bind(&row.id)
-        .bind(row.telegram_chat_id)
-        .bind(&row.title)
-        .bind(&row.system_prompt)
-        .bind(&row.provider)
-        .bind(&row.model)
-        .bind(&created_at)
-        .bind(&updated_at)
-        .bind(&row.metadata)
-        .execute(self.pool)
-        .await?;
+        let active = chat::ActiveModel {
+            id: Set(row.id.clone()),
+            telegram_chat_id: Set(row.telegram_chat_id),
+            title: Set(row.title.clone()),
+            system_prompt: Set(row.system_prompt.clone()),
+            provider: Set(row.provider.clone()),
+            model: Set(row.model.clone()),
+            created_at: Set(row.created_at.to_rfc3339()),
+            updated_at: Set(row.updated_at.to_rfc3339()),
+            metadata: Set(row.metadata.clone()),
+        };
+        chat::Entity::insert(active)
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::column(chat::Column::Id)
+                    .update_columns([
+                        chat::Column::TelegramChatId,
+                        chat::Column::Title,
+                        chat::Column::SystemPrompt,
+                        chat::Column::Provider,
+                        chat::Column::Model,
+                        chat::Column::UpdatedAt,
+                        chat::Column::Metadata,
+                    ])
+                    .to_owned(),
+            )
+            .exec(self.conn)
+            .await?;
         Ok(())
     }
 
     pub async fn find_by_telegram_id(&self, telegram_chat_id: i64) -> DbResult<Option<ChatRow>> {
-        let row = sqlx::query(
-            "SELECT id, telegram_chat_id, title, system_prompt, provider, model, created_at, updated_at, metadata FROM chats WHERE telegram_chat_id = ?",
-        )
-        .bind(telegram_chat_id)
-        .fetch_optional(self.pool)
-        .await?;
-        Ok(row.as_ref().map(Self::row_to_chat))
+        let model = chat::Entity::find()
+            .filter(chat::Column::TelegramChatId.eq(telegram_chat_id))
+            .one(self.conn)
+            .await?;
+        Ok(model.map(model_to_chat))
     }
 
     pub async fn find_by_id(&self, id: &str) -> DbResult<Option<ChatRow>> {
-        let row = sqlx::query(
-            "SELECT id, telegram_chat_id, title, system_prompt, provider, model, created_at, updated_at, metadata FROM chats WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(self.pool)
-        .await?;
-        Ok(row.as_ref().map(Self::row_to_chat))
+        let model = chat::Entity::find_by_id(id).one(self.conn).await?;
+        Ok(model.map(model_to_chat))
     }
 
-    pub async fn list_messages(&self, chat_id: &str, limit: i64) -> DbResult<Vec<MessageRow>> {
-        let rows = sqlx::query(
-            "SELECT id, chat_id, user_id, role, content, created_at, metadata FROM messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(chat_id)
-        .bind(limit)
-        .fetch_all(self.pool)
-        .await?;
-        let mut result: Vec<MessageRow> = rows.iter().map(Self::row_to_message).collect();
-        result.reverse();
-        Ok(result)
+    pub async fn list_messages(&self, chat_id: &str, limit: u64) -> DbResult<Vec<MessageRow>> {
+        // Fetch the N most recent messages, then reverse for chronological order.
+        let models = message::Entity::find()
+            .filter(message::Column::ChatId.eq(chat_id))
+            .order_by_desc(message::Column::CreatedAt)
+            .limit(limit)
+            .all(self.conn)
+            .await?;
+        let mut rows: Vec<MessageRow> = models.into_iter().map(model_to_message).collect();
+        rows.reverse();
+        Ok(rows)
     }
 
     pub async fn insert_message(&self, row: &MessageRow) -> DbResult<()> {
-        let created_at = row.created_at.to_rfc3339();
-        sqlx::query(
-            "INSERT INTO messages (id, chat_id, user_id, role, content, created_at, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.chat_id)
-        .bind(&row.user_id)
-        .bind(&row.role)
-        .bind(&row.content)
-        .bind(&created_at)
-        .bind(&row.metadata)
-        .execute(self.pool)
-        .await?;
+        let active = message::ActiveModel {
+            id: Set(row.id.clone()),
+            chat_id: Set(row.chat_id.clone()),
+            user_id: Set(row.user_id.clone()),
+            role: Set(row.role.clone()),
+            content: Set(row.content.clone()),
+            created_at: Set(row.created_at.to_rfc3339()),
+            metadata: Set(row.metadata.clone()),
+        };
+        message::Entity::insert(active).exec(self.conn).await?;
         Ok(())
     }
 
@@ -166,10 +157,9 @@ impl<'a> ChatRepo<'a> {
         if let Some(row) = self.find_by_telegram_id(telegram_chat_id).await? {
             return Ok(row);
         }
-        let id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let row = ChatRow {
-            id,
+            id: Uuid::new_v4().to_string(),
             telegram_chat_id: Some(telegram_chat_id),
             title: title.map(|t| t.to_string()),
             system_prompt: None,

@@ -34,7 +34,7 @@ impl AuditLogger {
                     details: serde_json::to_string(&event.details).unwrap_or_default(),
                     created_at: event.timestamp,
                 };
-                let repo = unly_db::repo::audit::AuditRepo::new(db.pool());
+                let repo = unly_db::repo::audit::AuditRepo::new(db.conn());
                 if let Err(e) = repo.insert(&row).await {
                     error!("failed to write audit log entry: {}", e);
                 }

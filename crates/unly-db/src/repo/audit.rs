@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
 
-use crate::error::DbResult;
+use crate::{entity::audit_log, error::DbResult};
 
-/// A row in the audit_log table.
+/// Public audit row returned from the repository layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditRow {
     pub id: String,
@@ -19,75 +19,69 @@ pub struct AuditRow {
     pub created_at: DateTime<Utc>,
 }
 
-pub struct AuditRepo<'a> {
-    pool: &'a SqlitePool,
-}
-
 fn parse_dt(s: &str) -> DateTime<Utc> {
-    chrono::DateTime::parse_from_rfc3339(s)
+    DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
 }
 
-fn row_to_audit(row: &sqlx::sqlite::SqliteRow) -> AuditRow {
-    let created_at: String = row.try_get("created_at").unwrap_or_default();
+fn model_to_audit(m: audit_log::Model) -> AuditRow {
     AuditRow {
-        id: row.try_get("id").unwrap_or_default(),
-        event_type: row.try_get("event_type").unwrap_or_default(),
-        user_id: row.try_get("user_id").ok(),
-        chat_id: row.try_get("chat_id").ok(),
-        agent_id: row.try_get("agent_id").ok(),
-        subject: row.try_get("subject").unwrap_or_default(),
-        action: row.try_get("action").unwrap_or_default(),
-        outcome: row.try_get("outcome").unwrap_or_default(),
-        details: row.try_get("details").unwrap_or_else(|_| "{}".to_string()),
-        created_at: parse_dt(&created_at),
+        id: m.id,
+        event_type: m.event_type,
+        user_id: m.user_id,
+        chat_id: m.chat_id,
+        agent_id: m.agent_id,
+        subject: m.subject,
+        action: m.action,
+        outcome: m.outcome,
+        details: m.details,
+        created_at: parse_dt(&m.created_at),
     }
 }
 
+pub struct AuditRepo<'a> {
+    conn: &'a DatabaseConnection,
+}
+
 impl<'a> AuditRepo<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(conn: &'a DatabaseConnection) -> Self {
+        Self { conn }
     }
 
     pub async fn insert(&self, row: &AuditRow) -> DbResult<()> {
-        let created_at = row.created_at.to_rfc3339();
-        sqlx::query(
-            "INSERT INTO audit_log (id, event_type, user_id, chat_id, agent_id, subject, action, outcome, details, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.event_type)
-        .bind(&row.user_id)
-        .bind(&row.chat_id)
-        .bind(&row.agent_id)
-        .bind(&row.subject)
-        .bind(&row.action)
-        .bind(&row.outcome)
-        .bind(&row.details)
-        .bind(&created_at)
-        .execute(self.pool)
-        .await?;
+        let active = audit_log::ActiveModel {
+            id: Set(row.id.clone()),
+            event_type: Set(row.event_type.clone()),
+            user_id: Set(row.user_id.clone()),
+            chat_id: Set(row.chat_id.clone()),
+            agent_id: Set(row.agent_id.clone()),
+            subject: Set(row.subject.clone()),
+            action: Set(row.action.clone()),
+            outcome: Set(row.outcome.clone()),
+            details: Set(row.details.clone()),
+            created_at: Set(row.created_at.to_rfc3339()),
+        };
+        audit_log::Entity::insert(active).exec(self.conn).await?;
         Ok(())
     }
 
-    pub async fn list_recent(&self, limit: i64) -> DbResult<Vec<AuditRow>> {
-        let rows = sqlx::query(
-            "SELECT id, event_type, user_id, chat_id, agent_id, subject, action, outcome, details, created_at FROM audit_log ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_audit).collect())
+    pub async fn list_recent(&self, limit: u64) -> DbResult<Vec<AuditRow>> {
+        let models = audit_log::Entity::find()
+            .order_by_desc(audit_log::Column::CreatedAt)
+            .limit(limit)
+            .all(self.conn)
+            .await?;
+        Ok(models.into_iter().map(model_to_audit).collect())
     }
 
-    pub async fn list_by_user(&self, user_id: &str, limit: i64) -> DbResult<Vec<AuditRow>> {
-        let rows = sqlx::query(
-            "SELECT id, event_type, user_id, chat_id, agent_id, subject, action, outcome, details, created_at FROM audit_log WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(user_id)
-        .bind(limit)
-        .fetch_all(self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_audit).collect())
+    pub async fn list_by_user(&self, user_id: &str, limit: u64) -> DbResult<Vec<AuditRow>> {
+        let models = audit_log::Entity::find()
+            .filter(audit_log::Column::UserId.eq(user_id))
+            .order_by_desc(audit_log::Column::CreatedAt)
+            .limit(limit)
+            .all(self.conn)
+            .await?;
+        Ok(models.into_iter().map(model_to_audit).collect())
     }
 }

@@ -1,16 +1,20 @@
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+    Statement, ConnectionTrait, DbBackend,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, SqlitePool};
 
-use crate::error::DbResult;
+use crate::{entity::memory_entry, error::DbResult};
 
-/// A row in the memory_entries table (vector memory store).
+/// Public memory-entry row returned from the repository layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryEntryRow {
     pub id: String,
     pub scope_type: String,
     pub scope_id: String,
     pub content: String,
+    /// Serialized embedding vector (little-endian f32 sequence).
     pub embedding: Vec<u8>,
     pub source_type: Option<String>,
     pub source_id: Option<String>,
@@ -20,98 +24,100 @@ pub struct MemoryEntryRow {
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
-    chrono::DateTime::parse_from_rfc3339(s)
+    DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
 }
 
-fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> MemoryEntryRow {
-    let created_at: String = row.try_get("created_at").unwrap_or_default();
-    let expires_at: Option<String> = row.try_get("expires_at").ok();
+fn model_to_entry(m: memory_entry::Model) -> MemoryEntryRow {
     MemoryEntryRow {
-        id: row.try_get("id").unwrap_or_default(),
-        scope_type: row.try_get("scope_type").unwrap_or_default(),
-        scope_id: row.try_get("scope_id").unwrap_or_default(),
-        content: row.try_get("content").unwrap_or_default(),
-        embedding: row.try_get("embedding").unwrap_or_default(),
-        source_type: row.try_get("source_type").ok(),
-        source_id: row.try_get("source_id").ok(),
-        metadata: row.try_get("metadata").unwrap_or_else(|_| "{}".to_string()),
-        created_at: parse_dt(&created_at),
-        expires_at: expires_at.as_deref().map(parse_dt),
+        id: m.id,
+        scope_type: m.scope_type,
+        scope_id: m.scope_id,
+        content: m.content,
+        embedding: m.embedding,
+        source_type: m.source_type,
+        source_id: m.source_id,
+        metadata: m.metadata,
+        created_at: parse_dt(&m.created_at),
+        expires_at: m.expires_at.as_deref().map(parse_dt),
     }
 }
 
 pub struct MemoryRepo<'a> {
-    pool: &'a SqlitePool,
+    conn: &'a DatabaseConnection,
 }
 
 impl<'a> MemoryRepo<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(conn: &'a DatabaseConnection) -> Self {
+        Self { conn }
     }
 
     pub async fn insert(&self, row: &MemoryEntryRow) -> DbResult<()> {
-        let created_at = row.created_at.to_rfc3339();
-        let expires_at = row.expires_at.map(|t| t.to_rfc3339());
-        sqlx::query(
-            "INSERT INTO memory_entries (id, scope_type, scope_id, content, embedding, source_type, source_id, metadata, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.scope_type)
-        .bind(&row.scope_id)
-        .bind(&row.content)
-        .bind(&row.embedding)
-        .bind(&row.source_type)
-        .bind(&row.source_id)
-        .bind(&row.metadata)
-        .bind(&created_at)
-        .bind(&expires_at)
-        .execute(self.pool)
-        .await?;
+        let active = memory_entry::ActiveModel {
+            id: Set(row.id.clone()),
+            scope_type: Set(row.scope_type.clone()),
+            scope_id: Set(row.scope_id.clone()),
+            content: Set(row.content.clone()),
+            embedding: Set(row.embedding.clone()),
+            source_type: Set(row.source_type.clone()),
+            source_id: Set(row.source_id.clone()),
+            metadata: Set(row.metadata.clone()),
+            created_at: Set(row.created_at.to_rfc3339()),
+            expires_at: Set(row.expires_at.map(|t| t.to_rfc3339())),
+        };
+        memory_entry::Entity::insert(active)
+            .exec(self.conn)
+            .await?;
         Ok(())
     }
 
+    /// Return all non-expired entries for a given scope, ordered newest first.
     pub async fn list_by_scope(
         &self,
         scope_type: &str,
         scope_id: &str,
     ) -> DbResult<Vec<MemoryEntryRow>> {
-        let rows = sqlx::query(
-            "SELECT id, scope_type, scope_id, content, embedding, source_type, source_id, metadata, created_at, expires_at FROM memory_entries WHERE scope_type = ? AND scope_id = ? AND (expires_at IS NULL OR expires_at > datetime('now')) ORDER BY created_at DESC",
-        )
-        .bind(scope_type)
-        .bind(scope_id)
-        .fetch_all(self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_memory).collect())
+        let now = Utc::now().to_rfc3339();
+        let models = memory_entry::Entity::find()
+            .filter(memory_entry::Column::ScopeType.eq(scope_type))
+            .filter(memory_entry::Column::ScopeId.eq(scope_id))
+            .filter(
+                sea_orm::Condition::any()
+                    .add(memory_entry::Column::ExpiresAt.is_null())
+                    .add(memory_entry::Column::ExpiresAt.gt(now)),
+            )
+            .order_by_desc(memory_entry::Column::CreatedAt)
+            .all(self.conn)
+            .await?;
+        Ok(models.into_iter().map(model_to_entry).collect())
     }
 
+    /// Delete entries whose `expires_at` is in the past; returns count removed.
     pub async fn delete_expired(&self) -> DbResult<u64> {
-        let result = sqlx::query(
-            "DELETE FROM memory_entries WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')",
-        )
-        .execute(self.pool)
-        .await?;
-        Ok(result.rows_affected())
+        let now = Utc::now().to_rfc3339();
+        let result = memory_entry::Entity::delete_many()
+            .filter(memory_entry::Column::ExpiresAt.is_not_null())
+            .filter(memory_entry::Column::ExpiresAt.lte(now))
+            .exec(self.conn)
+            .await?;
+        Ok(result.rows_affected)
     }
 
     pub async fn delete_by_id(&self, id: &str) -> DbResult<bool> {
-        let result = sqlx::query("DELETE FROM memory_entries WHERE id = ?")
-            .bind(id)
-            .execute(self.pool)
+        let result = memory_entry::Entity::delete_by_id(id)
+            .exec(self.conn)
             .await?;
-        Ok(result.rows_affected() > 0)
+        Ok(result.rows_affected > 0)
     }
 
-    pub async fn count_by_scope(&self, scope_type: &str, scope_id: &str) -> DbResult<i64> {
-        let row = sqlx::query(
-            "SELECT COUNT(*) as count FROM memory_entries WHERE scope_type = ? AND scope_id = ?",
-        )
-        .bind(scope_type)
-        .bind(scope_id)
-        .fetch_one(self.pool)
-        .await?;
-        Ok(row.try_get("count").unwrap_or(0))
+    pub async fn count_by_scope(&self, scope_type: &str, scope_id: &str) -> DbResult<u64> {
+        use sea_orm::PaginatorTrait;
+        let count = memory_entry::Entity::find()
+            .filter(memory_entry::Column::ScopeType.eq(scope_type))
+            .filter(memory_entry::Column::ScopeId.eq(scope_id))
+            .count(self.conn)
+            .await?;
+        Ok(count)
     }
 }

@@ -413,7 +413,7 @@ impl Cli {
 
                 match cmd {
                     JobCommands::List => {
-                        let repo = unly_db::repo::job::JobRepo::new(db.pool());
+                        let repo = unly_db::repo::job::JobRepo::new(db.conn());
                         let jobs = repo.list_enabled().await?;
                         if jobs.is_empty() {
                             println!("No jobs defined.");
@@ -456,7 +456,7 @@ impl Cli {
                 let db = Database::connect(&config.database.path, 1, false)
                     .await
                     .context("connecting to database")?;
-                let repo = unly_db::repo::audit::AuditRepo::new(db.pool());
+                let repo = unly_db::repo::audit::AuditRepo::new(db.conn());
                 let rows = repo.list_recent(n).await?;
                 if rows.is_empty() {
                     println!("No audit log entries.");
@@ -492,7 +492,7 @@ impl Cli {
                         if parts.len() != 2 {
                             bail!("scope must be in format 'type:id' (e.g. 'chat:uuid')");
                         }
-                        let repo = unly_db::repo::memory::MemoryRepo::new(db.pool());
+                        let repo = unly_db::repo::memory::MemoryRepo::new(db.conn());
                         let entries = repo.list_by_scope(parts[0], parts[1]).await?;
                         if entries.is_empty() {
                             println!("No memory entries for scope: {}", scope);
@@ -508,7 +508,7 @@ impl Cli {
                         }
                     }
                     MemoryCommands::Prune => {
-                        let repo = unly_db::repo::memory::MemoryRepo::new(db.pool());
+                        let repo = unly_db::repo::memory::MemoryRepo::new(db.conn());
                         let deleted = repo.delete_expired().await?;
                         println!("✅ Pruned {} expired memory entries", deleted);
                     }

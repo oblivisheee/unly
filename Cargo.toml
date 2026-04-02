@@ -39,8 +39,19 @@ toml = "0.8"
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 
-# Database
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "migrate", "uuid", "chrono", "json"] }
+# Database — SeaORM with SQLite backend
+sea-orm = { version = "1", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-chrono",
+    "with-uuid",
+    "with-json",
+] }
+sea-orm-migration = { version = "1", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+] }
 
 # Logging / tracing
 tracing = "0.1"

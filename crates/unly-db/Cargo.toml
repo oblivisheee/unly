@@ -1,6 +1,6 @@
 [package]
 name = "unly-db"
-description = "Database access layer, migrations, and typed repositories for the unly agent platform"
+description = "SeaORM-based database access layer and migrations for the unly agent platform"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,17 +8,12 @@ license.workspace = true
 
 [dependencies]
 unly-core.workspace = true
-unly-config.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
-uuid.workspace = true
 chrono.workspace = true
-tokio.workspace = true
+uuid.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

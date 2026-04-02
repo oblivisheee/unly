@@ -64,7 +64,7 @@ impl Scheduler {
             updated_at: now,
         };
 
-        let repo = unly_db::repo::job::JobRepo::new(self.db.pool());
+        let repo = unly_db::repo::job::JobRepo::new(self.db.conn());
         if let Err(e) = repo.upsert(&row).await {
             warn!("failed to persist job definition: {}", e);
         }
@@ -135,7 +135,7 @@ impl Scheduler {
                                 finished_at: Some(finished_at),
                             };
 
-                            let repo = unly_db::repo::job::JobRepo::new(db.pool());
+                            let repo = unly_db::repo::job::JobRepo::new(db.conn());
                             if let Err(e) = repo.insert_run(&run_row).await {
                                 warn!("failed to persist job run: {}", e);
                             }
