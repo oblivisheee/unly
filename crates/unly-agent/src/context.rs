@@ -6,6 +6,23 @@ use unly_core::{
     types::Timestamp,
 };
 
+/// What kind of media to send to the Telegram chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaKind {
+    Photo,
+    Document,
+}
+
+/// A media file queued for delivery to the Telegram chat by the tool runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaSend {
+    pub kind: MediaKind,
+    /// Absolute path to the file on disk.
+    pub path: String,
+    pub caption: Option<String>,
+}
+
 /// The runtime context for an agent interaction.
 #[derive(Debug, Clone)]
 pub struct AgentContext {
@@ -23,6 +40,8 @@ pub struct AgentContext {
     pub created_at: Timestamp,
     /// Accumulated reasoning/tool-use steps (Mode 1 — never shown to the user).
     pub thinking_log: Vec<ThinkingStep>,
+    /// Media files queued for delivery after the current turn.
+    pub pending_media: Vec<MediaSend>,
 }
 
 /// A step recorded in the agent's inner reasoning log.
@@ -66,6 +85,7 @@ impl AgentContext {
             pending_approvals: Vec::new(),
             created_at: unly_core::types::now(),
             thinking_log: Vec::new(),
+            pending_media: Vec::new(),
         }
     }
 

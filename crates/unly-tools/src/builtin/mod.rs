@@ -4,6 +4,7 @@ pub mod http;
 pub mod orchestration;
 pub mod shell;
 pub mod skills;
+pub mod telegram;
 
 pub use fs::{
     FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool, FsMkdirTool, FsMoveTool, FsReadTool,
@@ -20,3 +21,4 @@ pub use skills::{
     PluginCreateTool, PluginDisableTool, PluginEnableTool, PluginListTool, PluginRemoveTool,
     SkillCreateTool, SkillDisableTool, SkillEnableTool, SkillListTool, SkillRemoveTool,
 };
+pub use telegram::{TelegramSendDocumentTool, TelegramSendPhotoTool};

@@ -14,7 +14,7 @@ pub mod error;
 pub mod runtime;
 pub mod subagent;
 
-pub use context::{AgentContext, ThinkingStep};
+pub use context::{AgentContext, MediaKind, MediaSend, ThinkingStep};
 pub use error::AgentError;
 pub use runtime::{AgentResponse, AgentRuntime, AgentRuntimeConfig, StreamEvent};
 pub use subagent::{SubagentHandle, SubagentManager, SubagentRequest, SubagentSpawnConfig};
