@@ -8,4 +8,4 @@ pub mod scheduler;
 
 pub use error::SchedulerError;
 pub use job::{JobDefinition, JobType};
-pub use scheduler::Scheduler;
+pub use scheduler::{JobCallback, Scheduler};

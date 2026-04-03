@@ -59,6 +59,11 @@ impl AgentRuntime {
         &self.config
     }
 
+    /// Return the execution policy governing tool approval requirements.
+    pub fn tool_policy(&self) -> &unly_tools::policy::ExecutionPolicy {
+        self.tool_registry.policy()
+    }
+
     fn build_system_prompt_with_hot_reload(&self) -> String {
         if let Some(app_config) = &self.config.app_config {
             let mut prompt = self.config.system_prompt.clone();
@@ -568,7 +573,10 @@ impl AgentRuntime {
                 if !pending_approval.is_empty() {
                     ctx.pending_approvals = pending_approval.clone();
                     let _ = sender
-                        .send(StreamEvent::ApprovalRequired(pending_approval))
+                        .send(StreamEvent::ApprovalRequired {
+                            pending: pending_approval,
+                            ctx: Box::new(ctx.clone()),
+                        })
                         .await;
                     return Ok(());
                 }
@@ -1179,7 +1187,14 @@ pub enum StreamEvent {
     /// The final, complete user-visible response (thinking tags stripped).
     Done(String),
     /// One or more tool calls need user approval.
-    ApprovalRequired(Vec<crate::context::PendingApproval>),
+    ///
+    /// Carries a snapshot of the `AgentContext` at the moment the approval
+    /// requirement was detected so the handler can resume from the correct
+    /// conversation state regardless of any session-store timing races.
+    ApprovalRequired {
+        pending: Vec<crate::context::PendingApproval>,
+        ctx: Box<crate::context::AgentContext>,
+    },
     /// A media file should be sent to the Telegram chat before the text response.
     SendMedia {
         kind: MediaKind,

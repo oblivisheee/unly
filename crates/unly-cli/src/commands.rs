@@ -197,11 +197,6 @@ impl Cli {
                     Some(audit.clone()),
                 );
                 let sessions = SessionStore::new();
-                if config.scheduler.enabled {
-                    tokio::spawn(async move {
-                        scheduler.run().await;
-                    });
-                }
 
                 let config_arc = Arc::new(config);
                 let bot = Arc::new(TelegramBot::new(
@@ -212,6 +207,16 @@ impl Cli {
                     db.clone(),
                     audit.clone(),
                 ));
+
+                // Restore persisted cron jobs AFTER TelegramBot::new() has
+                // registered the cron executor, then start the scheduler.
+                if config_arc.scheduler.enabled {
+                    unly_tools::builtin::restore_jobs_from_db(&db, &scheduler).await;
+                    let scheduler_for_spawn = scheduler.clone();
+                    tokio::spawn(async move {
+                        scheduler_for_spawn.run().await;
+                    });
+                }
 
                 info!("all subsystems initialized - starting Telegram bot");
                 audit.success("startup", "system", "start");
