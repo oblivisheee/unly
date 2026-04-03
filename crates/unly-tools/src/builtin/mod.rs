@@ -4,7 +4,10 @@ pub mod http;
 pub mod orchestration;
 pub mod shell;
 
-pub use fs::{FsListTool, FsReadTool, FsWriteTool};
+pub use fs::{
+    FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool, FsMkdirTool, FsMoveTool, FsReadTool,
+    FsStatTool, FsWriteTool,
+};
 pub use git::{GitLogTool, GitStatusTool};
 pub use http::{HttpGetTool, HttpPostTool};
 pub use orchestration::{

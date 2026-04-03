@@ -20,7 +20,7 @@ impl HttpGetTool {
                 .timeout(Duration::from_secs(30))
                 .user_agent("unly-agent/0.1.0")
                 .build()
-                .expect("http client"),
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 }
@@ -118,7 +118,7 @@ impl HttpPostTool {
                 .timeout(Duration::from_secs(30))
                 .user_agent("unly-agent/0.1.0")
                 .build()
-                .expect("http client"),
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 }

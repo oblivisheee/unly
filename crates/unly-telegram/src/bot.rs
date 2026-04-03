@@ -369,12 +369,11 @@ impl TelegramBot {
                             send_response_text(&bot, msg.chat.id, &text).await?;
                         }
                         Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            let names: Vec<&str> =
-                                pending.iter().map(|p| p.tool_name.as_str()).collect();
                             bot.send_message(
                                 msg.chat.id,
-                                format!("Further approval required for: {}", names.join(", ")),
+                                format_approval_prompt(&pending),
                             )
+                            .parse_mode(ParseMode::Html)
                             .await?;
                         }
                         Err(e) => {
@@ -513,14 +512,13 @@ impl TelegramBot {
                             send_response_text(&bot, msg.chat.id, &answer).await?;
                         }
                         Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            let details = format_pending_approvals(&pending);
                             let keyboard = InlineKeyboardMarkup::new(vec![vec![
                                 InlineKeyboardButton::callback("Approve", "approve"),
                                 InlineKeyboardButton::callback("Deny", "deny"),
                             ]]);
                             bot.send_message(
                                 msg.chat.id,
-                                format!("The agent wants to use:\n{}\n\nDo you approve?", details),
+                                format_approval_prompt(&pending),
                             )
                             .parse_mode(ParseMode::Html)
                             .reply_markup(keyboard)
@@ -541,14 +539,13 @@ impl TelegramBot {
                             send_response_text(&bot, msg.chat.id, &answer).await?;
                         }
                         Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            let details = format_pending_approvals(&pending);
                             let keyboard = InlineKeyboardMarkup::new(vec![vec![
                                 InlineKeyboardButton::callback("Approve", "approve"),
                                 InlineKeyboardButton::callback("Deny", "deny"),
                             ]]);
                             bot.send_message(
                                 msg.chat.id,
-                                format!("The agent wants to use:\n{}\n\nDo you approve?", details),
+                                format_approval_prompt(&pending),
                             )
                             .reply_markup(keyboard)
                             .await?;
@@ -821,7 +818,6 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                                     }
                                 }
                                 Ok(AgentResponse::ApprovalRequired { pending: p }) => {
-                                    let details = format_pending_approvals(&p);
                                     let keyboard = InlineKeyboardMarkup::new(vec![vec![
                                         InlineKeyboardButton::callback("Approve", "approve"),
                                         InlineKeyboardButton::callback("Deny", "deny"),
@@ -829,10 +825,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                                     let _ = bot
                                         .send_message(
                                             msg.chat.id,
-                                            format!(
-                                                "The agent wants to use:\n{}\n\nDo you approve?",
-                                                details
-                                            ),
+                                            format_approval_prompt(&p),
                                         )
                                         .parse_mode(ParseMode::Html)
                                         .reply_markup(keyboard)
@@ -854,11 +847,10 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                         InlineKeyboardButton::callback("Approve", "approve"),
                         InlineKeyboardButton::callback("Deny", "deny"),
                     ]]);
-                    let details = format_pending_approvals(&pending);
                     if let Err(e) = bot
                         .send_message(
                             msg.chat.id,
-                            format!("The agent wants to use:\n{}\n\nDo you approve?", details),
+                            format_approval_prompt(&pending),
                         )
                         .parse_mode(ParseMode::Html)
                         .reply_markup(keyboard)
@@ -1061,10 +1053,9 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                                 send_response_text(&bot, message.chat().id, &text).await?;
                             }
                             Ok(AgentResponse::ApprovalRequired { pending }) => {
-                                let details = format_pending_approvals(&pending);
                                 bot.send_message(
                                     message.chat().id,
-                                    format!("Further approval required for:\n{}", details),
+                                    format_approval_prompt(&pending),
                                 )
                                 .parse_mode(ParseMode::Html)
                                 .await?;
@@ -1644,18 +1635,249 @@ fn is_negative_approval(text: &str) -> bool {
 fn format_pending_approvals(pending: &[unly_agent::context::PendingApproval]) -> String {
     pending
         .iter()
-        .map(|p| {
-            if (p.tool_name == "bash" || p.tool_name == "shell")
-                && p.args.get("command").and_then(|v| v.as_str()).is_some()
-            {
-                let cmd = p.args["command"].as_str().unwrap_or_default();
-                format!("- {}: <code>{}</code>", p.tool_name, escape_html(cmd))
-            } else {
-                format!("- {}", escape_html(&p.tool_name))
-            }
+        .enumerate()
+        .map(|(i, p)| {
+            let risk_icon = match p.risk_level.as_str() {
+                "Dangerous" => "🔴",
+                "Privileged" => "🟡",
+                _ => "🟢",
+            };
+            let risk_label = match p.risk_level.as_str() {
+                "Dangerous" => "DANGEROUS — irreversible or destructive",
+                "Privileged" => "PRIVILEGED — mutating or external action",
+                _ => "SAFE — read-only",
+            };
+
+            let detail = build_approval_detail(&p.tool_name, &p.args);
+            format!(
+                "<b>{}. {} {} ({})</b>\n{}",
+                i + 1,
+                risk_icon,
+                escape_html(&p.tool_name),
+                risk_label,
+                detail
+            )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n\n")
+}
+
+/// Build a human-readable, contextual description of what a tool call will do.
+fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "bash" | "shell" => {
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                let mode = args
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("run");
+                let mode_label = match mode {
+                    "start" => " (background)",
+                    "status" => " (check status)",
+                    _ => "",
+                };
+                format!(
+                    "  Action: Execute shell command{}\n  Command: <code>{}</code>",
+                    mode_label,
+                    escape_html(cmd)
+                )
+            } else {
+                "  Action: Execute shell command (no command provided)".to_string()
+            }
+        }
+        "fs_write" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown path>");
+            let append = args.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+            let action = if append { "Append to" } else { "Overwrite" };
+            let content_preview = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|c| {
+                    let preview = c.chars().take(80).collect::<String>();
+                    if c.len() > 80 {
+                        format!("{}…", preview)
+                    } else {
+                        preview
+                    }
+                })
+                .unwrap_or_default();
+            format!(
+                "  Action: {} file (MUTATING)\n  Path: <code>{}</code>\n  Preview: <code>{}</code>",
+                action,
+                escape_html(path),
+                escape_html(&content_preview)
+            )
+        }
+        "fs_delete" => {
+            let path = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown path>");
+            let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let scope = if recursive {
+                "recursively (directory + all contents)"
+            } else {
+                "single file or empty directory"
+            };
+            format!(
+                "  Action: DELETE {} — IRREVERSIBLE\n  Target: <code>{}</code>",
+                scope,
+                escape_html(path)
+            )
+        }
+        "fs_copy" => {
+            let src = args
+                .get("src")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let dst = args
+                .get("dst")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            format!(
+                "  Action: Copy file\n  From: <code>{}</code>\n  To: <code>{}</code>",
+                escape_html(src),
+                escape_html(dst)
+            )
+        }
+        "fs_move" => {
+            let src = args
+                .get("src")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let dst = args
+                .get("dst")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            format!(
+                "  Action: Move/rename (MUTATING)\n  From: <code>{}</code>\n  To: <code>{}</code>",
+                escape_html(src),
+                escape_html(dst)
+            )
+        }
+        "http_post" => {
+            let url = args
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown url>");
+            let body_preview = args
+                .get("body")
+                .map(|b| {
+                    let s = b.to_string();
+                    let preview = s.chars().take(100).collect::<String>();
+                    if s.len() > 100 {
+                        format!("{}…", preview)
+                    } else {
+                        preview
+                    }
+                })
+                .unwrap_or_default();
+            format!(
+                "  Action: HTTP POST — external network request\n  URL: <code>{}</code>\n  Body: <code>{}</code>",
+                escape_html(url),
+                escape_html(&body_preview)
+            )
+        }
+        "spawn_subagent" => {
+            let task = args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<no task>");
+            let model = args
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("default");
+            format!(
+                "  Action: Spawn background subagent with full permissions\n  Task: {}\n  Model: {}",
+                escape_html(task),
+                escape_html(model)
+            )
+        }
+        "cron_job" => {
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cron = args
+                .get("cron_expression")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let task = args
+                .get("task")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            match action {
+                "create" => format!(
+                    "  Action: Create scheduled cron job\n  Name: {}\n  Schedule: <code>{}</code>\n  Task: {}",
+                    escape_html(name),
+                    escape_html(cron),
+                    escape_html(task)
+                ),
+                "delete" => format!(
+                    "  Action: Delete cron job (IRREVERSIBLE)\n  Job ID: <code>{}</code>",
+                    escape_html(id)
+                ),
+                _ => format!(
+                    "  Action: {} cron job\n  Job ID: <code>{}</code>",
+                    escape_html(action),
+                    escape_html(id)
+                ),
+            }
+        }
+        _ => {
+            // Generic: show all non-internal args as key: value pairs.
+            let pairs: Vec<String> = args
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter(|(k, _)| !k.starts_with("__"))
+                        .map(|(k, v)| {
+                            let val = match v {
+                                serde_json::Value::String(s) => {
+                                    let preview = s.chars().take(80).collect::<String>();
+                                    if s.len() > 80 {
+                                        format!("{}…", preview)
+                                    } else {
+                                        preview
+                                    }
+                                }
+                                other => other.to_string(),
+                            };
+                            format!("  {}: <code>{}</code>", escape_html(k), escape_html(&val))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if pairs.is_empty() {
+                "  (no arguments)".to_string()
+            } else {
+                pairs.join("\n")
+            }
+        }
+    }
+}
+
+/// Build the complete approval prompt text shown to the user.
+fn format_approval_prompt(pending: &[unly_agent::context::PendingApproval]) -> String {
+    let count = pending.len();
+    let header = if count == 1 {
+        "⚠️ <b>Agent Action Requires Approval</b>\n\nThe agent wants to execute the following action:".to_string()
+    } else {
+        format!(
+            "⚠️ <b>Agent Actions Require Approval</b>\n\nThe agent wants to execute <b>{}</b> actions:",
+            count
+        )
+    };
+    let details = format_pending_approvals(pending);
+    format!("{}\n\n{}\n\nApprove or deny below.", header, details)
 }
 
 fn escape_html(s: &str) -> String {

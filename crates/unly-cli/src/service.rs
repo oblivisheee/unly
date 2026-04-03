@@ -11,8 +11,9 @@ use unly_providers::{
 };
 use unly_tools::{
     builtin::{
-        create_scheduler, CronJobTool, FsListTool, FsReadTool, FsWriteTool, GitLogTool,
-        GitStatusTool, HttpGetTool, HttpPostTool, SpawnSubagentTool,
+        create_scheduler, CronJobTool, FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool,
+        FsMkdirTool, FsMoveTool, FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool,
+        HttpGetTool, HttpPostTool, SpawnSubagentTool,
     },
     policy::ExecutionPolicy,
     ToolRegistry,
@@ -26,6 +27,12 @@ fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
         "fs_read",
         "fs_list",
         "fs_write",
+        "fs_delete",
+        "fs_copy",
+        "fs_move",
+        "fs_mkdir",
+        "fs_stat",
+        "fs_grep",
         "spawn_subagent",
         "cron_job",
     ] {
@@ -93,6 +100,12 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     registry.register(FsReadTool);
     registry.register(FsListTool);
     registry.register(FsWriteTool);
+    registry.register(FsDeleteTool);
+    registry.register(FsCopyTool);
+    registry.register(FsMoveTool);
+    registry.register(FsMkdirTool);
+    registry.register(FsStatTool);
+    registry.register(FsGrepTool);
     registry.register(GitStatusTool);
     registry.register(GitLogTool);
     registry.register(unly_tools::builtin::ShellTool::new(
@@ -133,6 +146,12 @@ pub fn build_tools_with_scheduler(
     registry.register(FsReadTool);
     registry.register(FsListTool);
     registry.register(FsWriteTool);
+    registry.register(FsDeleteTool);
+    registry.register(FsCopyTool);
+    registry.register(FsMoveTool);
+    registry.register(FsMkdirTool);
+    registry.register(FsStatTool);
+    registry.register(FsGrepTool);
     registry.register(GitStatusTool);
     registry.register(GitLogTool);
     registry.register(unly_tools::builtin::ShellTool::new(
