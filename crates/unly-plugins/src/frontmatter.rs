@@ -76,12 +76,7 @@ pub fn clean_yaml_value(raw: &str) -> String {
 
 /// Build the SKILL.md / PLUGIN.md frontmatter block from metadata fields.
 /// Returns the `---\n...\n---\n` string ready to prepend to the instructions.
-pub fn build_frontmatter(
-    name: &str,
-    description: &str,
-    version: &str,
-    author: &str,
-) -> String {
+pub fn build_frontmatter(name: &str, description: &str, version: &str, author: &str) -> String {
     let mut fm = format!("---\nname: {}\n", name);
     if !description.is_empty() {
         fm.push_str(&format!("description: {}\n", description));

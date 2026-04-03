@@ -13,6 +13,7 @@ unly-db.workspace = true
 unly-memory.workspace = true
 unly-providers.workspace = true
 unly-tools.workspace = true
+unly-plugins.workspace = true
 unly-audit.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true

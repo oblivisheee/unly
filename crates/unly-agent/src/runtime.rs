@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use unly_config::AppConfig;
 use unly_core::{
     model::{ChatMessage, ChatMessageContent, ChatRequest, StreamChunk},
     permissions::Permission,
@@ -11,6 +12,7 @@ use unly_core::{
     Result,
 };
 use unly_memory::{MemoryQuery, MemoryScope, MemoryStore};
+use unly_plugins::{PluginLoader, SkillLoader};
 use unly_tools::ToolRegistry;
 
 use crate::context::{AgentContext, MediaKind, MediaSend, PendingApproval};
@@ -38,6 +40,7 @@ pub struct AgentRuntimeConfig {
     pub enable_db_memory_augmentation: bool,
     pub append_turns_to_today_memory: bool,
     pub force_plain_output: bool,
+    pub app_config: Option<AppConfig>,
 }
 
 /// The main agent runtime.
@@ -54,6 +57,19 @@ pub struct AgentRuntime {
 impl AgentRuntime {
     pub fn config(&self) -> &AgentRuntimeConfig {
         &self.config
+    }
+
+    fn build_system_prompt_with_hot_reload(&self) -> String {
+        if let Some(app_config) = &self.config.app_config {
+            let mut prompt = self.config.system_prompt.clone();
+            prompt.push_str(&build_runtime_extensions_prompt(
+                self.tool_registry.as_ref(),
+                app_config,
+            ));
+            prompt
+        } else {
+            self.config.system_prompt.clone()
+        }
     }
 
     pub fn new(
@@ -91,6 +107,7 @@ impl AgentRuntime {
         ctx: &mut AgentContext,
         user_input: ChatMessageContent,
     ) -> Result<AgentResponse> {
+        ctx.system_prompt = self.build_system_prompt_with_hot_reload();
         let user_msg = user_input_for_memory(&user_input);
         let memory_ctx = self.build_memory_context(ctx, &user_msg).await;
         let user_msg_for_memory = user_msg.clone();
@@ -112,6 +129,7 @@ impl AgentRuntime {
         let provider = self.get_provider(&ctx.provider)?;
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
+        let mut provider_retry_count = 0u32;
         let preapproved_tools =
             ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools);
 
@@ -141,7 +159,23 @@ impl AgentRuntime {
                 );
             }
 
-            let response = provider.chat(request).await?;
+            let response = match provider.chat(request).await {
+                Ok(resp) => {
+                    provider_retry_count = 0;
+                    resp
+                }
+                Err(e) => {
+                    provider_retry_count += 1;
+                    if provider_retry_count <= 2 {
+                        ctx.log_thinking(
+                            "provider_error_retry",
+                            format!("retry {} after provider error: {}", provider_retry_count, e),
+                        );
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             if let Some(tool_calls) = response.tool_calls.as_ref().filter(|tc| !tc.is_empty()) {
                 // --- THINKING PHASE: execute tool calls ---
@@ -350,6 +384,7 @@ impl AgentRuntime {
         user_input: ChatMessageContent,
         sender: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
+        ctx.system_prompt = self.build_system_prompt_with_hot_reload();
         let user_msg = user_input_for_memory(&user_input);
         let memory_ctx = self.build_memory_context(ctx, &user_msg).await;
         let user_msg_for_memory = user_msg.clone();
@@ -371,6 +406,7 @@ impl AgentRuntime {
         let provider = self.get_provider(&ctx.provider)?;
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
+        let mut provider_retry_count = 0u32;
         let preapproved_tools =
             ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools);
 
@@ -400,7 +436,23 @@ impl AgentRuntime {
                 );
             }
 
-            let response = provider.chat(probe_request).await?;
+            let response = match provider.chat(probe_request).await {
+                Ok(resp) => {
+                    provider_retry_count = 0;
+                    resp
+                }
+                Err(e) => {
+                    provider_retry_count += 1;
+                    if provider_retry_count <= 2 {
+                        ctx.log_thinking(
+                            "provider_error_retry",
+                            format!("retry {} after provider error: {}", provider_retry_count, e),
+                        );
+                        continue;
+                    }
+                    return Err(e);
+                }
+            };
 
             if let Some(tool_calls) = response.tool_calls.as_ref().filter(|tc| !tc.is_empty()) {
                 // Thinking phase: notify the sender about each tool call.
@@ -616,6 +668,7 @@ impl AgentRuntime {
 
     /// Re-run pending tool calls after user approval.
     pub async fn process_approved(&self, ctx: &mut AgentContext) -> Result<AgentResponse> {
+        ctx.system_prompt = self.build_system_prompt_with_hot_reload();
         let pending = std::mem::take(&mut ctx.pending_approvals);
 
         for approval in &pending {
@@ -651,7 +704,15 @@ impl AgentRuntime {
             });
         }
 
-        let response = self.continue_from_tools(ctx).await?;
+        let mut response = self.continue_from_tools(ctx).await?;
+        if let AgentResponse::ApprovalRequired { .. } = response {
+            for _ in 0..2 {
+                response = self.continue_from_tools(ctx).await?;
+                if !matches!(response, AgentResponse::ApprovalRequired { .. }) {
+                    break;
+                }
+            }
+        }
         if let AgentResponse::Text(ref text) = response {
             let user_msg = ctx
                 .messages
@@ -1014,6 +1075,76 @@ fn looks_like_manual_confirmation_request(text: &str) -> bool {
         || t.contains("что предпочтительнее")
 }
 
+fn build_runtime_extensions_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> String {
+    let skills = SkillLoader::load_from_dir(&config.plugins.skills_dir);
+    let plugins = PluginLoader::load_from_dir(&config.plugins.plugins_dir);
+    let active_skills: Vec<_> = skills.into_iter().filter(|s| s.enabled).collect();
+    let active_plugins: Vec<_> = plugins.into_iter().filter(|p| p.enabled).collect();
+
+    let policy = tool_registry.policy();
+    let tool_lines = tool_registry
+        .list_schemas()
+        .into_iter()
+        .map(|s| format!("- {} ({:?}): {}", s.name, s.risk, s.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut out = String::from(
+        "\n\n---\n\n# Runtime Extensions (Hot Reloaded)\n\
+Only skills/plugins listed in this section are currently active. \
+If earlier sections conflict with this one, treat this section as authoritative.\n\n",
+    );
+
+    out.push_str("## Active Skills\n");
+    if active_skills.is_empty() {
+        out.push_str("- none\n\n");
+    } else {
+        for skill in &active_skills {
+            out.push_str(&format!(
+                "### {} — {}\n\n{}\n\n",
+                skill.meta.name,
+                if skill.meta.description.is_empty() {
+                    "(no description)"
+                } else {
+                    &skill.meta.description
+                },
+                skill.instructions.trim()
+            ));
+        }
+    }
+
+    out.push_str("## Active Plugins\n");
+    if active_plugins.is_empty() {
+        out.push_str("- none\n\n");
+    } else {
+        for plugin in &active_plugins {
+            out.push_str(&format!(
+                "### {} — {}\n\n{}\n\n",
+                plugin.meta.name,
+                if plugin.meta.description.is_empty() {
+                    "(no description)"
+                } else {
+                    &plugin.meta.description
+                },
+                plugin.instructions.trim()
+            ));
+        }
+    }
+
+    out.push_str("## Runtime Tools Snapshot\n");
+    out.push_str(&tool_lines);
+    out.push_str("\n\n## Runtime Policy Snapshot\n");
+    out.push_str(&format!(
+        "- require approval for privileged: {}\n- require approval for dangerous: {}\n- max tool execution seconds: {}\n- max concurrent tools: {}\n",
+        policy.require_approval_for_privileged,
+        policy.require_approval_for_dangerous,
+        policy.max_execution_seconds,
+        policy.max_concurrent,
+    ));
+
+    out
+}
+
 /// Response from the agent runtime (non-streaming mode).
 #[derive(Debug, Clone)]
 pub enum AgentResponse {
@@ -1080,7 +1211,11 @@ fn collect_media_from_result(ctx: &mut AgentContext, meta: &serde_json::Value) {
             .get("caption")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        ctx.pending_media.push(MediaSend { kind, path, caption });
+        ctx.pending_media.push(MediaSend {
+            kind,
+            path,
+            caption,
+        });
     }
 }
 

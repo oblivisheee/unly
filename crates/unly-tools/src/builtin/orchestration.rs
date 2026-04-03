@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use cron::Schedule;
 use once_cell::sync::Lazy;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde_json::{json, Value};
@@ -174,7 +175,7 @@ impl Tool for CronJobTool {
                     "action":{"type":"string","enum":["create","list","enable","disable","run_now","delete"]},
                     "id":{"type":"string"},
                     "name":{"type":"string"},
-                    "cron_expression":{"type":"string"},
+                    "cron_expression":{"type":"string","description":"Cron schedule. Supports 5-field (min hour day month weekday) and 6-field (sec min hour day month weekday) formats."},
                     "task":{"type":"string"},
                     "notify_mode":{"type":"string","enum":["silent","message"],"default":"silent"}
                 },
@@ -220,6 +221,14 @@ impl Tool for CronJobTool {
                         ));
                     }
                 };
+                let cron_expression = normalize_cron_expression(&cron_expression);
+                if let Err(e) = Schedule::from_str(&cron_expression) {
+                    return Ok(ToolResult::error(
+                        ctx.tool_call_id.clone(),
+                        format!("invalid cron_expression '{}': {}", cron_expression, e),
+                        start.elapsed().as_millis() as u64,
+                    ));
+                }
                 let task = match args.get("task").and_then(|v| v.as_str()) {
                     Some(v) if !v.trim().is_empty() => v.trim().to_string(),
                     _ => {
@@ -324,6 +333,11 @@ impl Tool for CronJobTool {
                     .execute(Statement::from_string(backend, sql))
                     .await
                     .map_err(|e| unly_core::Error::Database(e.to_string()))?;
+                if action == "enable" || action == "disable" {
+                    let _ = self.scheduler.set_job_enabled(id, action == "enable").await;
+                } else {
+                    let _ = self.scheduler.remove_job(id).await;
+                }
                 Ok(ToolResult::success(
                     ctx.tool_call_id.clone(),
                     json!({"status":"ok","action":action,"id":id}).to_string(),
@@ -434,4 +448,15 @@ pub fn build_notify_message(task: &str, trigger: &str, result: &str) -> String {
 
 pub fn escape_sql(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn normalize_cron_expression(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    // Accept 5-field standard cron by prepending seconds=0 to match runtime parser.
+    if parts.len() == 5 {
+        format!("0 {}", trimmed)
+    } else {
+        trimmed.to_string()
+    }
 }

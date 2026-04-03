@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
@@ -438,9 +438,8 @@ impl Cli {
                 PluginCommands::Install { path } => {
                     let config = load_config(&config_path).unwrap_or_else(|_| default_config());
                     let skills_dir = &config.plugins.skills_dir;
-                    let src = std::fs::canonicalize(&path).with_context(|| {
-                        format!("path does not exist: {}", path.display())
-                    })?;
+                    let src = std::fs::canonicalize(&path)
+                        .with_context(|| format!("path does not exist: {}", path.display()))?;
                     match SkillLoader::install(&src, skills_dir) {
                         Ok(name) => {
                             println!("Skill '{}' installed successfully.", name);
@@ -613,7 +612,7 @@ impl Cli {
                 Ok(())
             }
 
-            Commands::Uninstall { skip } => run_uninstall_wizard(skip).await,
+            Commands::Uninstall { skip } => run_uninstall_wizard(skip, &config_path).await,
 
             Commands::Update { check } => {
                 if check {
@@ -624,10 +623,7 @@ impl Cli {
                             println!("\nRun `unly update` to install.");
                         }
                         Ok(None) => {
-                            println!(
-                                "Already up-to-date (v{}).",
-                                env!("CARGO_PKG_VERSION")
-                            );
+                            println!("Already up-to-date (v{}).", env!("CARGO_PKG_VERSION"));
                         }
                         Err(e) => bail!("update check failed: {}", e),
                     }
@@ -654,7 +650,7 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     if config_path.exists() {
         let overwrite = Confirm::with_theme(&theme)
             .with_prompt(format!(
-                "Config already exists at {}. Overwrite?",
+                "Config already exists at {}. Overwrite and reset workspace data?",
                 config_path.display()
             ))
             .default(false)
@@ -663,11 +659,18 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             println!("Setup cancelled. Existing config unchanged.");
             return Ok(());
         }
-        if let Err(e) = purge_subagents_from_existing_config(config_path).await {
-            println!(
-                "Warning: failed to clear subagents before config rewrite: {}",
-                e
-            );
+        let workspace_dir = workspace::workspace_dir();
+        if workspace_dir.exists() {
+            std::fs::remove_dir_all(&workspace_dir).with_context(|| {
+                format!(
+                    "removing existing workspace for overwrite: {}",
+                    workspace_dir.display()
+                )
+            })?;
+            println!("Existing workspace removed: {}", workspace_dir.display());
+        } else if config_path.exists() {
+            remove_path_if_exists(config_path)
+                .with_context(|| format!("removing existing config {}", config_path.display()))?;
         }
     }
 
@@ -903,10 +906,12 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run_uninstall_wizard(skip: bool) -> Result<()> {
+async fn run_uninstall_wizard(skip: bool, config_path: &Path) -> Result<()> {
     let theme = ColorfulTheme::default();
     let workspace_dir = workspace::workspace_dir();
-    let config_path = workspace::default_config_path();
+    let binary_path = cargo_unly_binary_path();
+    let custom_config_outside_workspace =
+        config_path.exists() && !config_path.starts_with(&workspace_dir);
 
     println!("\nUnly Uninstall");
     println!("{}", "=".repeat(50));
@@ -914,22 +919,23 @@ async fn run_uninstall_wizard(skip: bool) -> Result<()> {
         "This will permanently delete the full Unly workspace:\n  {}",
         workspace_dir.display()
     );
-
-    if !workspace_dir.exists() {
-        println!("Workspace does not exist. Nothing to remove.");
-        return Ok(());
+    if custom_config_outside_workspace {
+        println!("And custom config file:\n  {}", config_path.display());
+    }
+    if binary_path.exists() {
+        println!("And binary:\n  {}", binary_path.display());
     }
 
-    if let Err(e) = purge_subagents_from_existing_config(&config_path).await {
-        println!(
-            "Warning: failed to clear subagents before workspace removal: {}",
-            e
-        );
+    let any_target_exists =
+        workspace_dir.exists() || custom_config_outside_workspace || binary_path.exists();
+    if !any_target_exists {
+        println!("Nothing to remove.");
+        return Ok(());
     }
 
     if !skip {
         let confirm_first = Confirm::with_theme(&theme)
-            .with_prompt("Are you sure you want to delete all Unly data?")
+            .with_prompt("Are you sure you want to delete selected Unly data?")
             .default(false)
             .interact()?;
         if !confirm_first {
@@ -950,34 +956,47 @@ async fn run_uninstall_wizard(skip: bool) -> Result<()> {
         }
     }
 
-    std::fs::remove_dir_all(&workspace_dir)
-        .with_context(|| format!("removing workspace {}", workspace_dir.display()))?;
+    if workspace_dir.exists() {
+        std::fs::remove_dir_all(&workspace_dir)
+            .with_context(|| format!("removing workspace {}", workspace_dir.display()))?;
+        println!("Unly workspace removed: {}", workspace_dir.display());
+    }
+    if custom_config_outside_workspace {
+        remove_path_if_exists(config_path)
+            .with_context(|| format!("removing custom config {}", config_path.display()))?;
+        println!("Custom config removed: {}", config_path.display());
+    }
+    if binary_path.exists() {
+        remove_path_if_exists(&binary_path)
+            .with_context(|| format!("removing binary {}", binary_path.display()))?;
+        println!("Binary removed: {}", binary_path.display());
+    }
 
-    println!("Unly workspace removed: {}", workspace_dir.display());
     Ok(())
 }
 
-async fn purge_subagents_from_existing_config(config_path: &PathBuf) -> Result<()> {
-    if let Err(e) = workspace::clear_subagent_logs() {
-        println!("Warning: failed to clear subagent logs: {}", e);
-    }
-    if !config_path.exists() {
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
         return Ok(());
     }
-    let config = load_config(config_path)
-        .with_context(|| format!("loading config from {}", config_path.display()))?;
-    let db = Database::connect_with_config(&config.database)
-        .await
-        .context("connecting to database for subagent cleanup")?;
-    let deleted = db
-        .delete_all_subagents()
-        .await
-        .context("deleting subagents from database")?;
-    if deleted > 0 {
-        println!("Deleted {} subagent records.", deleted);
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
     }
-    db.close().await;
     Ok(())
+}
+
+fn cargo_unly_binary_path() -> PathBuf {
+    let cargo_home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".cargo")
+        });
+    cargo_home.join("bin").join("unly")
 }
 
 /// Print a table of skills or plugins to stdout.

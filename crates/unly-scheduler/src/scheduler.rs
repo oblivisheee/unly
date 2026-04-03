@@ -80,6 +80,32 @@ impl Scheduler {
         }
     }
 
+    /// Toggle in-memory enabled state for a registered job.
+    pub async fn set_job_enabled(&self, id: &str, enabled: bool) -> bool {
+        let found = {
+            let mut jobs = self.jobs.write().await;
+            if let Some((job, _)) = jobs.get_mut(id) {
+                job.enabled = enabled;
+                true
+            } else {
+                false
+            }
+        };
+        if !enabled {
+            self.last_dispatched.write().await.remove(id);
+        }
+        found
+    }
+
+    /// Remove a registered job from in-memory dispatch tables.
+    pub async fn remove_job(&self, id: &str) -> bool {
+        let removed = self.jobs.write().await.remove(id).is_some();
+        if removed {
+            self.last_dispatched.write().await.remove(id);
+        }
+        removed
+    }
+
     /// Start the scheduler loop (runs indefinitely, should be spawned as a task).
     pub async fn run(self: Arc<Self>) {
         info!("scheduler started");
@@ -125,7 +151,7 @@ impl Scheduler {
                                             .get(id.as_str())
                                             .map(|last| *last < scheduled_at)
                                             .unwrap_or(true),
-                                Err(_) => {
+                                        Err(_) => {
                                             warn!(
                                                 job_id = %id,
                                                 "could not read last_dispatched map (lock contention); skipping job this tick"

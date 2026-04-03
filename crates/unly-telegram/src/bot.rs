@@ -5,15 +5,17 @@ use std::time::Duration;
 use teloxide::{
     net::Download,
     prelude::*,
-    types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ParseMode},
+    types::{
+        CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, ParseMode,
+    },
     utils::command::BotCommands,
 };
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use unly_agent::{
-    AgentContext, AgentResponse, AgentRuntime, StreamEvent, SubagentManager, SubagentRequest,
-    SubagentSpawnConfig,
+    AgentContext, AgentResponse, AgentRuntime, MediaKind, StreamEvent, SubagentManager,
+    SubagentRequest, SubagentSpawnConfig,
 };
 use unly_audit::AuditLogger;
 use unly_config::{workspace, AppConfig, DbType};
@@ -136,8 +138,14 @@ impl TelegramBot {
                 );
                 let result_text = match runtime.process(&mut ctx, task.clone()).await {
                     Ok(AgentResponse::Text(text)) => text,
-                    Ok(AgentResponse::ApprovalRequired { pending }) => {
-                        format!("approval required for {} tool calls", pending.len())
+                    Ok(AgentResponse::ApprovalRequired { .. }) => {
+                        match runtime.process_approved(&mut ctx).await {
+                            Ok(AgentResponse::Text(text)) => text,
+                            Ok(AgentResponse::ApprovalRequired { pending }) => {
+                                format!("approval required for {} tool calls", pending.len())
+                            }
+                            Err(e) => return Err(e.to_string()),
+                        }
                     }
                     Err(e) => return Err(e.to_string()),
                 };
@@ -248,11 +256,7 @@ impl TelegramBot {
 
         match cmd {
             Command::Start => {
-                info!(
-                    user = tg_user_id,
-                    chat_id = tg_chat_id,
-                    "session started"
-                );
+                info!(user = tg_user_id, chat_id = tg_chat_id, "session started");
                 self.sessions.remove(tg_chat_id);
                 if workspace::is_boot_mode() {
                     let boot_start = self.generate_boot_start_message(tg_user_id).await;
@@ -264,11 +268,7 @@ impl TelegramBot {
                 }
             }
             Command::Reset => {
-                info!(
-                    user = tg_user_id,
-                    chat_id = tg_chat_id,
-                    "session reset"
-                );
+                info!(user = tg_user_id, chat_id = tg_chat_id, "session reset");
                 self.sessions.remove(tg_chat_id);
                 bot.send_message(msg.chat.id, "Session reset. Send your next request.")
                     .await?;
@@ -372,7 +372,7 @@ impl TelegramBot {
                 }
                 if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     if ctx.pending_approvals.is_empty() {
-                        bot.send_message(msg.chat.id, "ℹ No pending approvals.")
+                        bot.send_message(msg.chat.id, "No pending approvals.")
                             .await?;
                         return Ok(());
                     }
@@ -391,6 +391,9 @@ impl TelegramBot {
                     );
 
                     let response = self.runtime.process_approved(&mut ctx).await;
+                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut ctx).await {
+                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                    }
                     self.sessions.set(tg_chat_id, ctx);
 
                     match response {
@@ -398,21 +401,17 @@ impl TelegramBot {
                             send_response_text(&bot, msg.chat.id, &text).await?;
                         }
                         Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            bot.send_message(
-                                msg.chat.id,
-                                format_approval_prompt(&pending),
-                            )
-                            .parse_mode(ParseMode::Html)
-                            .await?;
+                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                                .parse_mode(ParseMode::Html)
+                                .await?;
                         }
                         Err(e) => {
-                            bot.send_message(msg.chat.id, format!(" Error after approval: {}", e))
+                            bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
                                 .await?;
                         }
                     }
                 } else {
-                    bot.send_message(msg.chat.id, "ℹ No active session.")
-                        .await?;
+                    bot.send_message(msg.chat.id, "No active session.").await?;
                 }
             }
 
@@ -432,7 +431,7 @@ impl TelegramBot {
                     let pending = std::mem::take(&mut ctx.pending_approvals);
                     self.sessions.set(tg_chat_id, ctx);
                     if pending.is_empty() {
-                        bot.send_message(msg.chat.id, "ℹ No pending approvals.")
+                        bot.send_message(msg.chat.id, "No pending approvals.")
                             .await?;
                     } else {
                         let names: Vec<&str> =
@@ -451,13 +450,12 @@ impl TelegramBot {
                         );
                         bot.send_message(
                             msg.chat.id,
-                            format!(" Denied tool executions: {}", names.join(", ")),
+                            format!("Denied tool executions: {}", names.join(", ")),
                         )
                         .await?;
                     }
                 } else {
-                    bot.send_message(msg.chat.id, "ℹ No active session.")
-                        .await?;
+                    bot.send_message(msg.chat.id, "No active session.").await?;
                 }
             }
             Command::Approval(mode) => match mode.trim().to_lowercase().as_str() {
@@ -468,11 +466,8 @@ impl TelegramBot {
                         mode = "auto",
                         "approval mode changed"
                     );
-                    self.audit.success(
-                        "approval_mode",
-                        tg_user_id.to_string(),
-                        "set mode=auto",
-                    );
+                    self.audit
+                        .success("approval_mode", tg_user_id.to_string(), "set mode=auto");
                     self.sessions.set_auto_approve(tg_chat_id, true);
                     bot.send_message(
                         msg.chat.id,
@@ -487,11 +482,8 @@ impl TelegramBot {
                         mode = "manual",
                         "approval mode changed"
                     );
-                    self.audit.success(
-                        "approval_mode",
-                        tg_user_id.to_string(),
-                        "set mode=manual",
-                    );
+                    self.audit
+                        .success("approval_mode", tg_user_id.to_string(), "set mode=manual");
                     self.sessions.set_auto_approve(tg_chat_id, false);
                     bot.send_message(
                         msg.chat.id,
@@ -579,6 +571,9 @@ impl TelegramBot {
                             _ => break,
                         }
                     }
+                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
+                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                    }
                     self.sessions.set(tg_chat_id, pending_ctx);
                     match response {
                         Ok(AgentResponse::Text(answer)) => {
@@ -589,13 +584,10 @@ impl TelegramBot {
                                 InlineKeyboardButton::callback("Approve", "approve"),
                                 InlineKeyboardButton::callback("Deny", "deny"),
                             ]]);
-                            bot.send_message(
-                                msg.chat.id,
-                                format_approval_prompt(&pending),
-                            )
-                            .parse_mode(ParseMode::Html)
-                            .reply_markup(keyboard)
-                            .await?;
+                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                                .parse_mode(ParseMode::Html)
+                                .reply_markup(keyboard)
+                                .await?;
                         }
                         Err(e) => {
                             bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
@@ -606,6 +598,9 @@ impl TelegramBot {
                 }
                 if is_affirmative_approval(&text) {
                     let response = self.runtime.process_approved(&mut pending_ctx).await;
+                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
+                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                    }
                     self.sessions.set(tg_chat_id, pending_ctx);
                     match response {
                         Ok(AgentResponse::Text(answer)) => {
@@ -616,12 +611,9 @@ impl TelegramBot {
                                 InlineKeyboardButton::callback("Approve", "approve"),
                                 InlineKeyboardButton::callback("Deny", "deny"),
                             ]]);
-                            bot.send_message(
-                                msg.chat.id,
-                                format_approval_prompt(&pending),
-                            )
-                            .reply_markup(keyboard)
-                            .await?;
+                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                                .reply_markup(keyboard)
+                                .await?;
                         }
                         Err(e) => {
                             bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
@@ -863,6 +855,23 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                     let _ = typing_stop_tx.send(true);
                     return Ok(());
                 }
+                StreamEvent::SendMedia {
+                    kind,
+                    path,
+                    caption,
+                } => {
+                    if let Err(e) =
+                        send_media(&bot, msg.chat.id, &kind, &path, caption.as_deref()).await
+                    {
+                        error!(
+                            chat_id = tg_chat_id,
+                            error = %e,
+                            media_kind = ?kind,
+                            media_path = %path,
+                            "failed to send streamed media"
+                        );
+                    }
+                }
                 StreamEvent::ApprovalRequired(pending) => {
                     let _ = typing_stop_tx.send(true);
                     if self.sessions.get_flags(tg_chat_id).auto_approve {
@@ -876,6 +885,13 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                                     }
                                     _ => break,
                                 }
+                            }
+                            if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut ctx).await {
+                                error!(
+                                    chat_id = tg_chat_id,
+                                    error = %e,
+                                    "failed to send auto-approved media"
+                                );
                             }
                             self.sessions.set(tg_chat_id, ctx);
                             match response {
@@ -896,10 +912,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                                         InlineKeyboardButton::callback("Deny", "deny"),
                                     ]]);
                                     let _ = bot
-                                        .send_message(
-                                            msg.chat.id,
-                                            format_approval_prompt(&p),
-                                        )
+                                        .send_message(msg.chat.id, format_approval_prompt(&p))
                                         .parse_mode(ParseMode::Html)
                                         .reply_markup(keyboard)
                                         .await;
@@ -921,10 +934,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                         InlineKeyboardButton::callback("Deny", "deny"),
                     ]]);
                     if let Err(e) = bot
-                        .send_message(
-                            msg.chat.id,
-                            format_approval_prompt(&pending),
-                        )
+                        .send_message(msg.chat.id, format_approval_prompt(&pending))
                         .parse_mode(ParseMode::Html)
                         .reply_markup(keyboard)
                         .await
@@ -961,7 +971,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         let sql = "SELECT id, status, depth, goal, model, updated_at, parent_agent_id \
                    FROM subagents \
                    ORDER BY updated_at DESC \
-                   LIMIT 20";
+                   LIMIT 4";
         let stmt = Statement::from_string(
             match self.db.db_type() {
                 DbType::Postgres => DatabaseBackend::Postgres,
@@ -1120,6 +1130,10 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                             .await?;
                     } else {
                         let response = self.runtime.process_approved(&mut ctx).await;
+                        if let Err(e) = drain_pending_media(&bot, message.chat().id, &mut ctx).await
+                        {
+                            error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                        }
                         self.sessions.set(tg_chat_id, ctx);
                         match response {
                             Ok(AgentResponse::Text(text)) => {
@@ -1316,7 +1330,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             text.push_str("\nNo subagents in this view.");
         } else {
             text.push_str("\nSelect a parent subagent:");
-            for s in selected.iter().take(12) {
+            for s in selected.iter().take(4) {
                 text.push_str(&format!("\n• {}", format_subagent_row_html(s)));
             }
         }
@@ -1325,7 +1339,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             InlineKeyboardButton::callback("Active", "subagents:active"),
             InlineKeyboardButton::callback("Recent", "subagents:recent"),
         ]];
-        for s in selected.iter().take(10) {
+        for s in selected.iter().take(4) {
             let short_id = s.id.chars().take(8).collect::<String>();
             let label = format!("{} [{}]", short_id, s.status);
             rows_buttons.push(vec![InlineKeyboardButton::callback(
@@ -1367,7 +1381,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                     .join("\n")
             };
             let body = format!(
-                "<b>Subagent</b> <code>{}</code>\nStatus: <code>{}</code>\nDepth: <code>{}</code>\nModel: <code>{}</code>\nUpdated: <code>{}</code>\nHeartbeat: <code>{}</code>\nTask: {}\n{}\n\n<b>Child subagents</b>\n{}\n\n<b>Recent actions</b>\n<pre>{}</pre>",
+                "<b>Subagent</b> <code>{}</code>\nStatus: <code>{}</code>\nDepth: <code>{}</code>\nModel: <code>{}</code>\nUpdated: <code>{}</code>\nHeartbeat: <code>{}</code>\nTask: {}\n{}\n\n<b>Child subagents</b>\n{}\n\n<b>Result</b>\n<pre>{}</pre>\n\n<b>Recent actions</b>\n<pre>{}</pre>",
                 escape_html(&d.id),
                 escape_html(&d.status),
                 d.depth,
@@ -1377,6 +1391,12 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                 escape_html(&d.goal.unwrap_or_else(|| "-".to_string())),
                 escape_html(&current),
                 child_lines,
+                escape_html(
+                    &d.result
+                        .as_deref()
+                        .map(|r| truncate_for_message(r, 1800))
+                        .unwrap_or_else(|| "No result yet.".to_string()),
+                ),
                 escape_html(if tail.is_empty() { "No log entries yet." } else { &tail })
             );
             let back = if d.status == "running" || d.status == "pending" {
@@ -1415,7 +1435,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
 
     async fn load_subagent_detail(&self, subagent_id: &str) -> Option<SubagentDetailRow> {
         let sql = format!(
-            "SELECT id, status, depth, goal, model, updated_at \
+            "SELECT id, status, depth, goal, model, updated_at, result \
              FROM subagents WHERE id='{}' LIMIT 1",
             escape_sql(subagent_id)
         );
@@ -1434,6 +1454,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             goal: row.try_get("", "goal").ok(),
             model: row.try_get("", "model").ok(),
             updated_at: row.try_get("", "updated_at").ok(),
+            result: row.try_get("", "result").ok(),
         })
     }
 
@@ -1715,22 +1736,16 @@ fn format_pending_approvals(pending: &[unly_agent::context::PendingApproval]) ->
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let risk_icon = match p.risk_level.as_str() {
-                "Dangerous" => "🔴",
-                "Privileged" => "🟡",
-                _ => "🟢",
-            };
             let risk_label = match p.risk_level.as_str() {
-                "Dangerous" => "DANGEROUS — irreversible or destructive",
-                "Privileged" => "PRIVILEGED — mutating or external action",
-                _ => "SAFE — read-only",
+                "Dangerous" => "dangerous (destructive or irreversible)",
+                "Privileged" => "privileged (mutating or external action)",
+                _ => "safe (read-only)",
             };
 
             let detail = build_approval_detail(&p.tool_name, &p.args);
             format!(
-                "<b>{}. {} {} ({})</b>\n{}",
+                "<b>{}. {} ({})</b>\n{}",
                 i + 1,
-                risk_icon,
                 escape_html(&p.tool_name),
                 risk_label,
                 detail
@@ -1745,10 +1760,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
     match tool_name {
         "bash" | "shell" => {
             if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                let mode = args
-                    .get("mode")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("run");
+                let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("run");
                 let mode_label = match mode {
                     "start" => " (background)",
                     "status" => " (check status)",
@@ -1768,13 +1780,19 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown path>");
-            let append = args.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+            let append = args
+                .get("append")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let action = if append { "Append to" } else { "Overwrite" };
             let content_preview = args
                 .get("content")
                 .and_then(|v| v.as_str())
                 .map(|c| {
-                    let preview = c.chars().take(APPROVAL_PREVIEW_MAX_CHARS).collect::<String>();
+                    let preview = c
+                        .chars()
+                        .take(APPROVAL_PREVIEW_MAX_CHARS)
+                        .collect::<String>();
                     if c.len() > APPROVAL_PREVIEW_MAX_CHARS {
                         format!("{}…", preview)
                     } else {
@@ -1783,7 +1801,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "  Action: {} file (MUTATING)\n  Path: <code>{}</code>\n  Preview: <code>{}</code>",
+                "  Action: {} file\n  Path: <code>{}</code>\n  Preview: <code>{}</code>",
                 action,
                 escape_html(path),
                 escape_html(&content_preview)
@@ -1794,14 +1812,17 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown path>");
-            let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let recursive = args
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let scope = if recursive {
                 "recursively (directory + all contents)"
             } else {
                 "single file or empty directory"
             };
             format!(
-                "  Action: DELETE {} — IRREVERSIBLE\n  Target: <code>{}</code>",
+                "  Action: Delete {}\n  Target: <code>{}</code>",
                 scope,
                 escape_html(path)
             )
@@ -1831,7 +1852,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>");
             format!(
-                "  Action: Move/rename (MUTATING)\n  From: <code>{}</code>\n  To: <code>{}</code>",
+                "  Action: Move or rename\n  From: <code>{}</code>\n  To: <code>{}</code>",
                 escape_html(src),
                 escape_html(dst)
             )
@@ -1845,7 +1866,10 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("body")
                 .map(|b| {
                     let s = b.to_string();
-                    let preview = s.chars().take(APPROVAL_BODY_PREVIEW_MAX_CHARS).collect::<String>();
+                    let preview = s
+                        .chars()
+                        .take(APPROVAL_BODY_PREVIEW_MAX_CHARS)
+                        .collect::<String>();
                     if s.len() > APPROVAL_BODY_PREVIEW_MAX_CHARS {
                         format!("{}…", preview)
                     } else {
@@ -1854,7 +1878,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "  Action: HTTP POST — external network request\n  URL: <code>{}</code>\n  Body: <code>{}</code>",
+                "  Action: Send HTTP POST request\n  URL: <code>{}</code>\n  Body: <code>{}</code>",
                 escape_html(url),
                 escape_html(&body_preview)
             )
@@ -1869,7 +1893,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("default");
             format!(
-                "  Action: Spawn background subagent with full permissions\n  Task: {}\n  Model: {}",
+                "  Action: Start background subagent\n  Task: {}\n  Model: {}",
                 escape_html(task),
                 escape_html(model)
             )
@@ -1879,18 +1903,12 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let cron = args
                 .get("cron_expression")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let task = args
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
             match action {
                 "create" => format!(
@@ -1900,7 +1918,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                     escape_html(task)
                 ),
                 "delete" => format!(
-                    "  Action: Delete cron job (IRREVERSIBLE)\n  Job ID: <code>{}</code>",
+                    "  Action: Delete scheduled cron job\n  Job ID: <code>{}</code>",
                     escape_html(id)
                 ),
                 _ => format!(
@@ -1920,7 +1938,10 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                         .map(|(k, v)| {
                             let val = match v {
                                 serde_json::Value::String(s) => {
-                                    let preview = s.chars().take(APPROVAL_PREVIEW_MAX_CHARS).collect::<String>();
+                                    let preview = s
+                                        .chars()
+                                        .take(APPROVAL_PREVIEW_MAX_CHARS)
+                                        .collect::<String>();
                                     if s.len() > APPROVAL_PREVIEW_MAX_CHARS {
                                         format!("{}…", preview)
                                     } else {
@@ -1947,15 +1968,18 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
 fn format_approval_prompt(pending: &[unly_agent::context::PendingApproval]) -> String {
     let count = pending.len();
     let header = if count == 1 {
-        "⚠️ <b>Agent Action Requires Approval</b>\n\nThe agent wants to execute the following action:".to_string()
+        "<b>Approval required</b>\n\nPending action:".to_string()
     } else {
         format!(
-            "⚠️ <b>Agent Actions Require Approval</b>\n\nThe agent wants to execute <b>{}</b> actions:",
+            "<b>Approval required</b>\n\nPending actions: <b>{}</b>",
             count
         )
     };
     let details = format_pending_approvals(pending);
-    format!("{}\n\n{}\n\nApprove or deny below.", header, details)
+    format!(
+        "{}\n\n{}\n\nUse Approve or Deny to continue.",
+        header, details
+    )
 }
 
 fn escape_html(s: &str) -> String {
@@ -2405,6 +2429,7 @@ struct SubagentDetailRow {
     goal: Option<String>,
     model: Option<String>,
     updated_at: Option<String>,
+    result: Option<String>,
 }
 
 fn format_subagent_row_html(s: &SubagentStatusRow) -> String {
@@ -2564,6 +2589,54 @@ async fn send_response_text(
     Ok(())
 }
 
+async fn send_media(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    kind: &MediaKind,
+    path: &str,
+    caption: Option<&str>,
+) -> Result<(), teloxide::RequestError> {
+    let input = InputFile::file(path.to_string());
+    match kind {
+        MediaKind::Photo => {
+            let req = bot.send_photo(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+        MediaKind::Document => {
+            let req = bot.send_document(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn drain_pending_media(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    ctx: &mut AgentContext,
+) -> Result<(), teloxide::RequestError> {
+    let pending = std::mem::take(&mut ctx.pending_media);
+    for media in pending {
+        send_media(
+            bot,
+            chat_id,
+            &media.kind,
+            &media.path,
+            media.caption.as_deref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn build_boot_summary() -> String {
     let boot_path = workspace::boot_path();
     let raw = std::fs::read_to_string(boot_path).unwrap_or_default();
@@ -2632,8 +2705,20 @@ async fn wait_and_notify_subagent_result(
         let status = manager.subagent_status(&subagent_id).await;
         match status {
             Some(s) if s == "completed" => {
+                let result_text = manager
+                    .subagent_outcome(&subagent_id)
+                    .await
+                    .and_then(|(_, r)| r)
+                    .unwrap_or_else(|| "No result payload.".to_string());
                 let _ = bot
-                    .send_message(chat_id, format!("Subagent {} completed.", subagent_id))
+                    .send_message(
+                        chat_id,
+                        format!(
+                            "Subagent {} completed.\nResult:\n{}",
+                            subagent_id,
+                            truncate_for_message(&result_text, 3200)
+                        ),
+                    )
                     .await;
                 return;
             }
@@ -2646,6 +2731,14 @@ async fn wait_and_notify_subagent_result(
             _ => {}
         }
     }
+}
+
+fn truncate_for_message(text: &str, max_chars: usize) -> String {
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 async fn resolve_telegram_chat_id(db: &Database, chat_id: ChatId) -> Option<i64> {

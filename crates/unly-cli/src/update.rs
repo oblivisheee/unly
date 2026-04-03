@@ -6,8 +6,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-const RELEASES_URL: &str =
-    "https://api.github.com/repos/oblivisheee/unly/releases/latest";
+const RELEASES_URL: &str = "https://api.github.com/repos/oblivisheee/unly/releases/latest";
 const USER_AGENT: &str = concat!("unly/", env!("CARGO_PKG_VERSION"));
 
 // ── GitHub API types ──────────────────────────────────────────────────────────
@@ -104,12 +103,8 @@ pub async fn perform_update() -> Result<()> {
     #[cfg(unix)]
     set_executable(&tmp)?;
 
-    std::fs::rename(&tmp, &current_exe).with_context(|| {
-        format!(
-            "replacing {} with updated binary",
-            current_exe.display()
-        )
-    })?;
+    std::fs::rename(&tmp, &current_exe)
+        .with_context(|| format!("replacing {} with updated binary", current_exe.display()))?;
 
     println!(
         "Updated to v{}. Restart unly to apply the new version.",

@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::skill::Skill;
 
@@ -58,15 +58,7 @@ impl SkillLoader {
             let enabled = !skill_dir.join(DISABLED_MARKER).exists();
 
             match Skill::from_skill_md(&content, skill_dir.clone(), enabled) {
-                Some(skill) => {
-                    info!(
-                        "loaded skill '{}' from {} (enabled={})",
-                        skill.meta.name,
-                        skill_dir.display(),
-                        enabled
-                    );
-                    skills.push(skill);
-                }
+                Some(skill) => skills.push(skill),
                 None => {
                     warn!(
                         "skipping {}: SKILL.md missing required 'name' frontmatter field",
@@ -137,7 +129,11 @@ impl SkillLoader {
     pub fn remove(id: &str, skills_dir: &Path) -> Result<(), String> {
         let target = skills_dir.join(id);
         if !target.exists() {
-            return Err(format!("skill '{}' not found in '{}'", id, skills_dir.display()));
+            return Err(format!(
+                "skill '{}' not found in '{}'",
+                id,
+                skills_dir.display()
+            ));
         }
         std::fs::remove_dir_all(&target)
             .map_err(|e| format!("failed to remove skill '{}': {}", id, e))
@@ -154,8 +150,7 @@ impl SkillLoader {
         if marker.exists() {
             return Ok(()); // already disabled
         }
-        std::fs::write(&marker, b"")
-            .map_err(|e| format!("failed to disable skill '{}': {}", id, e))
+        std::fs::write(&marker, b"").map_err(|e| format!("failed to disable skill '{}': {}", id, e))
     }
 
     /// Re-enable a previously disabled skill by removing its `.disabled`
@@ -169,8 +164,7 @@ impl SkillLoader {
         if !marker.exists() {
             return Ok(()); // already enabled
         }
-        std::fs::remove_file(&marker)
-            .map_err(|e| format!("failed to enable skill '{}': {}", id, e))
+        std::fs::remove_file(&marker).map_err(|e| format!("failed to enable skill '{}': {}", id, e))
     }
 }
 
@@ -201,8 +195,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_dir() -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("unly-skill-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("unly-skill-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

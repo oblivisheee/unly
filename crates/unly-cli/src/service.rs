@@ -16,7 +16,8 @@ use unly_tools::{
         FsMkdirTool, FsMoveTool, FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool,
         HttpGetTool, HttpPostTool, PluginCreateTool, PluginDisableTool, PluginEnableTool,
         PluginListTool, PluginRemoveTool, SkillCreateTool, SkillDisableTool, SkillEnableTool,
-        SkillListTool, SkillRemoveTool, SpawnSubagentTool,
+        SkillListTool, SkillRemoveTool, SpawnSubagentTool, TelegramSendDocumentTool,
+        TelegramSendPhotoTool,
     },
     policy::ExecutionPolicy,
     ToolRegistry,
@@ -48,6 +49,8 @@ fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
         "plugin_enable",
         "plugin_disable",
         "plugin_remove",
+        "telegram_send_photo",
+        "telegram_send_document",
     ] {
         if !enabled.iter().any(|t| t == name) {
             enabled.push(name.to_string());
@@ -106,15 +109,31 @@ followed when relevant:\n\n";
 fn register_management_tools(registry: &mut ToolRegistry, config: &AppConfig) {
     let skills_dir = config.plugins.skills_dir.clone();
     let plugins_dir = config.plugins.plugins_dir.clone();
-    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillListTool {
+        skills_dir: skills_dir.clone(),
+    });
+    registry.register(SkillCreateTool {
+        skills_dir: skills_dir.clone(),
+    });
+    registry.register(SkillEnableTool {
+        skills_dir: skills_dir.clone(),
+    });
+    registry.register(SkillDisableTool {
+        skills_dir: skills_dir.clone(),
+    });
     registry.register(SkillRemoveTool { skills_dir });
-    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginListTool {
+        plugins_dir: plugins_dir.clone(),
+    });
+    registry.register(PluginCreateTool {
+        plugins_dir: plugins_dir.clone(),
+    });
+    registry.register(PluginEnableTool {
+        plugins_dir: plugins_dir.clone(),
+    });
+    registry.register(PluginDisableTool {
+        plugins_dir: plugins_dir.clone(),
+    });
     registry.register(PluginRemoveTool { plugins_dir });
 }
 
@@ -157,6 +176,8 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
         config.tools.shell_working_dir.clone(),
         config.tools.require_approval_for_dangerous,
     ));
+    registry.register(TelegramSendPhotoTool);
+    registry.register(TelegramSendDocumentTool);
     registry.register(SpawnSubagentTool);
     register_management_tools(&mut registry, config);
 
@@ -204,6 +225,8 @@ pub fn build_tools_with_scheduler(
         config.tools.shell_working_dir.clone(),
         config.tools.require_approval_for_dangerous,
     ));
+    registry.register(TelegramSendPhotoTool);
+    registry.register(TelegramSendDocumentTool);
     registry.register(SpawnSubagentTool);
     let scheduler = create_scheduler(db.clone(), &config.scheduler);
     registry.register(CronJobTool::new(db, scheduler.clone()));
@@ -365,6 +388,7 @@ For cron tasks, prefer the native `cron_job` tool. For delegated execution, pref
 - Native runtime capabilities include:
   - `spawn_subagent` for background delegated tasks with full runtime permissions (after approval by policy).
   - `cron_job` for scheduled tasks (`create/list/enable/disable/run_now/delete`) with `notify_mode` support.
+  - `telegram_send_photo` and `telegram_send_document` for sending local files to the current Telegram chat.
   - terminal command execution tools (subject to policy/permissions).
 - Policy details:
   - require approval for privileged: {}
@@ -463,6 +487,7 @@ pub fn build_runtime(
             enable_db_memory_augmentation: config.agent.enable_db_memory_augmentation,
             append_turns_to_today_memory: config.agent.append_turns_to_today_memory,
             force_plain_output: false,
+            app_config: Some(config.clone()),
         },
         provider_registry,
         tool_registry,

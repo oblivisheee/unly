@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::frontmatter::{parse_common_frontmatter, strip_frontmatter};
 
@@ -93,7 +93,11 @@ impl PluginLoader {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(err) => {
-                warn!("failed to read plugins directory {}: {}", dir.display(), err);
+                warn!(
+                    "failed to read plugins directory {}: {}",
+                    dir.display(),
+                    err
+                );
                 return plugins;
             }
         };
@@ -120,15 +124,7 @@ impl PluginLoader {
             let enabled = !plugin_dir.join(DISABLED_MARKER).exists();
 
             match LoadedPlugin::from_plugin_md(&content, plugin_dir.clone(), enabled) {
-                Some(plugin) => {
-                    info!(
-                        "loaded plugin '{}' from {} (enabled={})",
-                        plugin.meta.name,
-                        plugin_dir.display(),
-                        enabled
-                    );
-                    plugins.push(plugin);
-                }
+                Some(plugin) => plugins.push(plugin),
                 None => {
                     warn!(
                         "skipping {}: PLUGIN.md missing required 'name' frontmatter field",
@@ -188,11 +184,6 @@ impl PluginLoader {
 
         copy_dir(src, &dest).map_err(|e| format!("failed to copy plugin directory: {}", e))?;
 
-        info!(
-            "installed plugin '{}' from '{}'",
-            plugin.meta.name,
-            src.display()
-        );
         Ok(plugin.meta.name)
     }
 
@@ -208,7 +199,6 @@ impl PluginLoader {
         }
         std::fs::remove_dir_all(&target)
             .map_err(|e| format!("failed to remove plugin '{}': {}", id, e))?;
-        info!("removed plugin '{}'", id);
         Ok(())
     }
 
@@ -225,7 +215,6 @@ impl PluginLoader {
         }
         std::fs::write(&marker, b"")
             .map_err(|e| format!("failed to disable plugin '{}': {}", id, e))?;
-        info!("disabled plugin '{}'", id);
         Ok(())
     }
 
@@ -242,7 +231,6 @@ impl PluginLoader {
         }
         std::fs::remove_file(&marker)
             .map_err(|e| format!("failed to enable plugin '{}': {}", id, e))?;
-        info!("enabled plugin '{}'", id);
         Ok(())
     }
 }
@@ -273,8 +261,7 @@ mod tests {
     use std::fs;
 
     fn tmp_dir() -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("unly-plugin-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("unly-plugin-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

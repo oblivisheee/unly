@@ -361,6 +361,24 @@ This subagent completed partial work up to this point; review the logs for progr
         row.try_get("", "status").ok()
     }
 
+    pub async fn subagent_outcome(&self, subagent_id: &str) -> Option<(String, Option<String>)> {
+        let backend = match self.db.db_type() {
+            unly_config::DbType::Postgres => DatabaseBackend::Postgres,
+            unly_config::DbType::Sqlite => DatabaseBackend::Sqlite,
+        };
+        let stmt = Statement::from_string(
+            backend,
+            format!(
+                "SELECT status, result FROM subagents WHERE id='{}' LIMIT 1",
+                escape_sql(subagent_id)
+            ),
+        );
+        let row = self.db.conn().query_one(stmt).await.ok().flatten()?;
+        let status: String = row.try_get("", "status").ok()?;
+        let result: Option<String> = row.try_get("", "result").ok();
+        Some((status, result))
+    }
+
     pub async fn stop_subagent(&self, subagent_id: &str) -> Result<()> {
         if let Ok(mut tasks) = SUBAGENT_TASKS.lock() {
             if let Some(handle) = tasks.remove(subagent_id) {

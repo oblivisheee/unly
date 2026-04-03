@@ -407,7 +407,12 @@ impl Tool for FsCopyTool {
         match std::fs::copy(&src, &dst) {
             Ok(bytes) => Ok(ToolResult::success(
                 ctx.tool_call_id.clone(),
-                format!("copied {} bytes: {} -> {}", bytes, src.display(), dst.display()),
+                format!(
+                    "copied {} bytes: {} -> {}",
+                    bytes,
+                    src.display(),
+                    dst.display()
+                ),
                 start.elapsed().as_millis() as u64,
             )),
             Err(e) => Ok(ToolResult::error(
@@ -562,7 +567,9 @@ impl Tool for FsStatTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "fs_stat".to_string(),
-            description: "Get metadata for a file or directory (size, type, modified time, permissions).".to_string(),
+            description:
+                "Get metadata for a file or directory (size, type, modified time, permissions)."
+                    .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -672,14 +679,16 @@ impl Tool for FsGrepTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let start = Instant::now();
-        let pattern = args["pattern"]
-            .as_str()
-            .ok_or_else(|| unly_core::Error::InvalidInput("missing pattern argument".to_string()))?;
+        let pattern = args["pattern"].as_str().ok_or_else(|| {
+            unly_core::Error::InvalidInput("missing pattern argument".to_string())
+        })?;
         let path_str = args["path"]
             .as_str()
             .ok_or_else(|| unly_core::Error::InvalidInput("missing path argument".to_string()))?;
         let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
-        let max_results = args["max_results"].as_u64().unwrap_or(DEFAULT_MAX_GREP_RESULTS as u64) as usize;
+        let max_results = args["max_results"]
+            .as_u64()
+            .unwrap_or(DEFAULT_MAX_GREP_RESULTS as u64) as usize;
 
         let path = match validate_path(path_str) {
             Ok(p) => p,
@@ -712,7 +721,13 @@ impl Tool for FsGrepTool {
 }
 
 /// Recursively grep a path for a pattern, appending results to `out`.
-fn grep_path(path: &Path, pattern: &str, case_insensitive: bool, max: usize, out: &mut Vec<String>) {
+fn grep_path(
+    path: &Path,
+    pattern: &str,
+    case_insensitive: bool,
+    max: usize,
+    out: &mut Vec<String>,
+) {
     if out.len() >= max {
         return;
     }

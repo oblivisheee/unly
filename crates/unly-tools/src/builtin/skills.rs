@@ -2,8 +2,7 @@
 //!
 //! These tools allow the agent to list, create, enable, disable, and remove
 //! skills and plugins at runtime.  They operate on the filesystem-backed
-//! skill/plugin directories and reflect changes immediately on the next
-//! agent start (or when the system prompt is regenerated).
+//! skill/plugin directories and are hot-reloaded on the very next turn.
 //!
 //! # Risk classification
 //! All management tools are `Privileged` — they modify agent behaviour but
@@ -14,7 +13,6 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tracing::info;
 
 use unly_core::{
     tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
@@ -125,7 +123,7 @@ impl Tool for SkillCreateTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "skill_create".to_string(),
-            description: "Create and install a new skill. Writes a SKILL.md to the skills directory and makes it available immediately after the next restart.".to_string(),
+            description: "Create and install a new skill. Writes a SKILL.md to the skills directory and makes it available immediately on the next turn.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -169,7 +167,12 @@ impl Tool for SkillCreateTool {
                 ));
             }
         };
-        if args.get("instructions").and_then(|v| v.as_str()).map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if args
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             return Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 "missing required argument: 'instructions'",
@@ -206,11 +209,10 @@ impl Tool for SkillCreateTool {
                 start.elapsed().as_millis() as u64,
             ));
         }
-        info!(skill = %name, "agent created new skill");
         Ok(ToolResult::success(
             ctx.tool_call_id.clone(),
             format!(
-                "Skill '{}' created at '{}'. It will be active after the next agent restart.",
+                "Skill '{}' created at '{}'. It will be active on the next turn.",
                 name,
                 skill_dir.display()
             ),
@@ -257,14 +259,11 @@ impl Tool for SkillEnableTool {
             }
         };
         match SkillLoader::enable(&id, &self.skills_dir) {
-            Ok(()) => {
-                info!(skill = %id, "agent enabled skill");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id.clone(),
-                    format!("Skill '{}' enabled.", id),
-                    start.elapsed().as_millis() as u64,
-                ))
-            }
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("Skill '{}' enabled.", id),
+                start.elapsed().as_millis() as u64,
+            )),
             Err(e) => Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 e,
@@ -312,14 +311,11 @@ impl Tool for SkillDisableTool {
             }
         };
         match SkillLoader::disable(&id, &self.skills_dir) {
-            Ok(()) => {
-                info!(skill = %id, "agent disabled skill");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id.clone(),
-                    format!("Skill '{}' disabled.", id),
-                    start.elapsed().as_millis() as u64,
-                ))
-            }
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("Skill '{}' disabled.", id),
+                start.elapsed().as_millis() as u64,
+            )),
             Err(e) => Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 e,
@@ -367,14 +363,11 @@ impl Tool for SkillRemoveTool {
             }
         };
         match SkillLoader::remove(&id, &self.skills_dir) {
-            Ok(()) => {
-                info!(skill = %id, "agent removed skill");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id.clone(),
-                    format!("Skill '{}' removed.", id),
-                    start.elapsed().as_millis() as u64,
-                ))
-            }
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("Skill '{}' removed.", id),
+                start.elapsed().as_millis() as u64,
+            )),
             Err(e) => Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 e,
@@ -454,7 +447,7 @@ impl Tool for PluginCreateTool {
     fn schema(&self) -> ToolSchema {
         ToolSchema {
             name: "plugin_create".to_string(),
-            description: "Create and install a new plugin. Writes a PLUGIN.md to the plugins directory.  The plugin instructions are injected into the system prompt after the next agent restart.".to_string(),
+            description: "Create and install a new plugin. Writes a PLUGIN.md to the plugins directory. The plugin instructions are injected into the system prompt on the next turn.".to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -498,7 +491,12 @@ impl Tool for PluginCreateTool {
                 ));
             }
         };
-        if args.get("instructions").and_then(|v| v.as_str()).map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if args
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             return Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 "missing required argument: 'instructions'",
@@ -534,11 +532,10 @@ impl Tool for PluginCreateTool {
                 start.elapsed().as_millis() as u64,
             ));
         }
-        info!(plugin = %name, "agent created new plugin");
         Ok(ToolResult::success(
             ctx.tool_call_id.clone(),
             format!(
-                "Plugin '{}' created at '{}'. It will be active after the next agent restart.",
+                "Plugin '{}' created at '{}'. It will be active on the next turn.",
                 name,
                 plugin_dir.display()
             ),
@@ -585,14 +582,11 @@ impl Tool for PluginEnableTool {
             }
         };
         match PluginLoader::enable(&id, &self.plugins_dir) {
-            Ok(()) => {
-                info!(plugin = %id, "agent enabled plugin");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id.clone(),
-                    format!("Plugin '{}' enabled.", id),
-                    start.elapsed().as_millis() as u64,
-                ))
-            }
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("Plugin '{}' enabled.", id),
+                start.elapsed().as_millis() as u64,
+            )),
             Err(e) => Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 e,
@@ -640,14 +634,11 @@ impl Tool for PluginDisableTool {
             }
         };
         match PluginLoader::disable(&id, &self.plugins_dir) {
-            Ok(()) => {
-                info!(plugin = %id, "agent disabled plugin");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id.clone(),
-                    format!("Plugin '{}' disabled.", id),
-                    start.elapsed().as_millis() as u64,
-                ))
-            }
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("Plugin '{}' disabled.", id),
+                start.elapsed().as_millis() as u64,
+            )),
             Err(e) => Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 e,
@@ -695,14 +686,11 @@ impl Tool for PluginRemoveTool {
             }
         };
         match PluginLoader::remove(&id, &self.plugins_dir) {
-            Ok(()) => {
-                info!(plugin = %id, "agent removed plugin");
-                Ok(ToolResult::success(
-                    ctx.tool_call_id.clone(),
-                    format!("Plugin '{}' removed.", id),
-                    start.elapsed().as_millis() as u64,
-                ))
-            }
+            Ok(()) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("Plugin '{}' removed.", id),
+                start.elapsed().as_millis() as u64,
+            )),
             Err(e) => Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 e,
