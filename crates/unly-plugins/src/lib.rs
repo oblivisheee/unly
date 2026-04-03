@@ -10,6 +10,7 @@
 //! directories that contain a `SKILL.md` file.
 
 pub mod error;
+pub mod frontmatter;
 pub mod manifest;
 pub mod plugin;
 pub mod plugin_loader;
@@ -18,6 +19,7 @@ pub mod skill;
 pub mod skill_loader;
 
 pub use error::PluginError;
+pub use frontmatter::build_frontmatter;
 pub use manifest::PluginManifest;
 pub use plugin::Plugin;
 pub use plugin_loader::{LoadedPlugin, PluginLoader, PluginMeta};

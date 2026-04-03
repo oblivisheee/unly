@@ -20,6 +20,8 @@
 
 use std::path::PathBuf;
 
+use crate::frontmatter::{parse_common_frontmatter, strip_frontmatter};
+
 /// Frontmatter metadata parsed from `SKILL.md`.
 #[derive(Debug, Clone, Default)]
 pub struct SkillMeta {
@@ -52,7 +54,13 @@ impl Skill {
     /// Returns `None` if the file does not contain valid frontmatter with a
     /// `name` key.
     pub fn from_skill_md(content: &str, path: PathBuf, enabled: bool) -> Option<Self> {
-        let meta = parse_frontmatter(content)?;
+        let common = parse_common_frontmatter(content)?;
+        let meta = SkillMeta {
+            name: common.name?,
+            description: common.description,
+            version: common.version,
+            author: common.author,
+        };
         let instructions = strip_frontmatter(content).trim().to_string();
         Some(Self {
             meta,
@@ -60,81 +68,6 @@ impl Skill {
             path,
             enabled,
         })
-    }
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/// Parse the YAML-style frontmatter between `---` fences.
-///
-/// Only simple `key: value` lines are supported — no nested structures.
-fn parse_frontmatter(content: &str) -> Option<SkillMeta> {
-    let content = content.trim_start();
-    if !content.starts_with("---") {
-        return None;
-    }
-    // Skip past the opening `---`
-    let rest = content.get(3..)?;
-
-    // Find the closing `---` fence.  It must appear at the start of a line.
-    let close = rest.find("\n---")?;
-    let frontmatter = &rest[..close];
-
-    let mut name: Option<String> = None;
-    let mut description = String::new();
-    let mut version = String::new();
-    let mut author = String::new();
-
-    for line in frontmatter.lines() {
-        let line = line.trim();
-        if let Some(val) = line.strip_prefix("name:") {
-            name = Some(clean_yaml_value(val));
-        } else if let Some(val) = line.strip_prefix("description:") {
-            description = clean_yaml_value(val);
-        } else if let Some(val) = line.strip_prefix("version:") {
-            version = clean_yaml_value(val);
-        } else if let Some(val) = line.strip_prefix("author:") {
-            author = clean_yaml_value(val);
-        }
-    }
-
-    Some(SkillMeta {
-        name: name?,
-        description,
-        version,
-        author,
-    })
-}
-
-/// Strip leading/trailing whitespace and optional surrounding quotes.
-fn clean_yaml_value(raw: &str) -> String {
-    let trimmed = raw.trim();
-    // Remove matching single or double quotes if present.
-    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
-        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
-    {
-        trimmed[1..trimmed.len() - 1].to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Return the Markdown body that follows the closing `---` fence.
-fn strip_frontmatter(content: &str) -> &str {
-    let content = content.trim_start();
-    if !content.starts_with("---") {
-        return content;
-    }
-    let rest = match content.get(3..) {
-        Some(r) => r,
-        None => return content,
-    };
-    // Find "\n---" which marks the end of the frontmatter block.
-    if let Some(end) = rest.find("\n---") {
-        let after_close = &rest[end + 4..]; // skip past "\n---"
-        after_close.trim_start_matches('\n')
-    } else {
-        content
     }
 }
 

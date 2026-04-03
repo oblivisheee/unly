@@ -415,43 +415,23 @@ impl Cli {
                             "\nInstall a skill with:   unly plugin install <path-to-skill-dir>"
                         );
                     } else {
-                        if !skills.is_empty() {
-                            println!("Skills ({})", skills_dir.display());
-                            println!(
-                                "{:<30} {:<10} Description",
-                                "Name", "Status"
-                            );
-                            println!("{}", "-".repeat(80));
-                            for s in &skills {
-                                let status = if s.enabled { "enabled" } else { "disabled" };
-                                println!(
-                                    "{:<30} {:<10} {}",
-                                    s.meta.name, status, s.meta.description
-                                );
-                            }
-                        } else {
-                            println!("Skills: none installed.");
-                        }
-
+                        print_ext_table(
+                            "Skills",
+                            skills_dir,
+                            skills.iter().map(|s| {
+                                (s.meta.name.clone(), s.enabled, s.meta.description.clone())
+                            }),
+                            "Skills: none installed.",
+                        );
                         println!();
-
-                        if !plugins.is_empty() {
-                            println!("Plugins ({})", plugins_dir.display());
-                            println!(
-                                "{:<30} {:<10} Description",
-                                "Name", "Status"
-                            );
-                            println!("{}", "-".repeat(80));
-                            for p in &plugins {
-                                let status = if p.enabled { "enabled" } else { "disabled" };
-                                println!(
-                                    "{:<30} {:<10} {}",
-                                    p.meta.name, status, p.meta.description
-                                );
-                            }
-                        } else {
-                            println!("Plugins: none installed.");
-                        }
+                        print_ext_table(
+                            "Plugins",
+                            plugins_dir,
+                            plugins.iter().map(|p| {
+                                (p.meta.name.clone(), p.enabled, p.meta.description.clone())
+                            }),
+                            "Plugins: none installed.",
+                        );
                     }
                     Ok(())
                 }
@@ -998,4 +978,28 @@ async fn purge_subagents_from_existing_config(config_path: &PathBuf) -> Result<(
     }
     db.close().await;
     Ok(())
+}
+
+/// Print a table of skills or plugins to stdout.
+///
+/// `title` is shown as the section heading with the directory path.
+/// `rows` is an iterator of `(name, enabled, description)` tuples.
+fn print_ext_table(
+    title: &str,
+    dir: &std::path::Path,
+    rows: impl Iterator<Item = (String, bool, String)>,
+    none_msg: &str,
+) {
+    let rows: Vec<_> = rows.collect();
+    if rows.is_empty() {
+        println!("{}", none_msg);
+        return;
+    }
+    println!("{} ({})", title, dir.display());
+    println!("{:<30} {:<10} Description", "Name", "Status");
+    println!("{}", "-".repeat(80));
+    for (name, enabled, description) in &rows {
+        let status = if *enabled { "enabled" } else { "disabled" };
+        println!("{:<30} {:<10} {}", name, status, description);
+    }
 }

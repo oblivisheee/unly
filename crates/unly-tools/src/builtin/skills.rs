@@ -20,7 +20,40 @@ use unly_core::{
     tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
     Result,
 };
-use unly_plugins::{PluginLoader, SkillLoader};
+use unly_plugins::{build_frontmatter, PluginLoader, SkillLoader};
+
+// ── Shared helper ─────────────────────────────────────────────────────────────
+
+/// Build the full SKILL.md / PLUGIN.md file content from the provided args.
+///
+/// Expects `args` to contain `instructions` (required), and optionally
+/// `description`, `version`, and `author`.
+fn build_md_content(name: &str, args: &Value) -> String {
+    let instructions = args
+        .get("instructions")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let version = args
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.1.0")
+        .to_string();
+    let author = args
+        .get("author")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let frontmatter = build_frontmatter(name, &description, &version, &author);
+    format!("{}\n{}\n", frontmatter, instructions)
+}
 
 // ── skill_list ────────────────────────────────────────────────────────────────
 
@@ -136,45 +169,15 @@ impl Tool for SkillCreateTool {
                 ));
             }
         };
-        let instructions = match args.get("instructions").and_then(|v| v.as_str()) {
-            Some(i) if !i.trim().is_empty() => i.trim().to_string(),
-            _ => {
-                return Ok(ToolResult::error(
-                    ctx.tool_call_id.clone(),
-                    "missing required argument: 'instructions'",
-                    start.elapsed().as_millis() as u64,
-                ));
-            }
-        };
-        let description = args
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let version = args
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.1.0")
-            .to_string();
-        let author = args
-            .get("author")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        if args.get("instructions").and_then(|v| v.as_str()).map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                "missing required argument: 'instructions'",
+                start.elapsed().as_millis() as u64,
+            ));
+        }
 
-        // Build SKILL.md content.
-        let mut frontmatter = format!("---\nname: {}\n", name);
-        if !description.is_empty() {
-            frontmatter.push_str(&format!("description: {}\n", description));
-        }
-        if !version.is_empty() {
-            frontmatter.push_str(&format!("version: {}\n", version));
-        }
-        if !author.is_empty() {
-            frontmatter.push_str(&format!("author: {}\n", author));
-        }
-        frontmatter.push_str("---\n");
-        let skill_md_content = format!("{}\n{}\n", frontmatter, instructions);
+        let skill_md_content = build_md_content(&name, &args);
 
         // Create directory and write SKILL.md.
         let skill_dir = self.skills_dir.join(&name);
@@ -495,44 +498,15 @@ impl Tool for PluginCreateTool {
                 ));
             }
         };
-        let instructions = match args.get("instructions").and_then(|v| v.as_str()) {
-            Some(i) if !i.trim().is_empty() => i.trim().to_string(),
-            _ => {
-                return Ok(ToolResult::error(
-                    ctx.tool_call_id.clone(),
-                    "missing required argument: 'instructions'",
-                    start.elapsed().as_millis() as u64,
-                ));
-            }
-        };
-        let description = args
-            .get("description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let version = args
-            .get("version")
-            .and_then(|v| v.as_str())
-            .unwrap_or("0.1.0")
-            .to_string();
-        let author = args
-            .get("author")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        if args.get("instructions").and_then(|v| v.as_str()).map(|s| s.trim().is_empty()).unwrap_or(true) {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                "missing required argument: 'instructions'",
+                start.elapsed().as_millis() as u64,
+            ));
+        }
 
-        let mut frontmatter = format!("---\nname: {}\n", name);
-        if !description.is_empty() {
-            frontmatter.push_str(&format!("description: {}\n", description));
-        }
-        if !version.is_empty() {
-            frontmatter.push_str(&format!("version: {}\n", version));
-        }
-        if !author.is_empty() {
-            frontmatter.push_str(&format!("author: {}\n", author));
-        }
-        frontmatter.push_str("---\n");
-        let plugin_md_content = format!("{}\n{}\n", frontmatter, instructions);
+        let plugin_md_content = build_md_content(&name, &args);
 
         let plugin_dir = self.plugins_dir.join(&name);
         if plugin_dir.exists() {

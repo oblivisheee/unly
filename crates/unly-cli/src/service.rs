@@ -102,6 +102,22 @@ const PLUGINS_SECTION_HEADER: &str =
     "# Plugins\n\nThe following plugins are installed and their instructions should be \
 followed when relevant:\n\n";
 
+/// Register the skill/plugin self-configuration tools into `registry`.
+fn register_management_tools(registry: &mut ToolRegistry, config: &AppConfig) {
+    let skills_dir = config.plugins.skills_dir.clone();
+    let plugins_dir = config.plugins.plugins_dir.clone();
+    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillRemoveTool { skills_dir });
+    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginRemoveTool { plugins_dir });
+}
+
 /// Build the tool registry from config.
 pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     let policy = ExecutionPolicy {
@@ -142,20 +158,7 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
         config.tools.require_approval_for_dangerous,
     ));
     registry.register(SpawnSubagentTool);
-
-    // Self-configuration tools (skill/plugin management).
-    let skills_dir = config.plugins.skills_dir.clone();
-    let plugins_dir = config.plugins.plugins_dir.clone();
-    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillRemoveTool { skills_dir: skills_dir.clone() });
-    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginRemoveTool { plugins_dir });
+    register_management_tools(&mut registry, config);
 
     Arc::new(registry)
 }
@@ -204,20 +207,7 @@ pub fn build_tools_with_scheduler(
     registry.register(SpawnSubagentTool);
     let scheduler = create_scheduler(db.clone(), &config.scheduler);
     registry.register(CronJobTool::new(db, scheduler.clone()));
-
-    // Self-configuration tools (skill/plugin management).
-    let skills_dir = config.plugins.skills_dir.clone();
-    let plugins_dir = config.plugins.plugins_dir.clone();
-    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
-    registry.register(SkillRemoveTool { skills_dir: skills_dir.clone() });
-    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
-    registry.register(PluginRemoveTool { plugins_dir });
+    register_management_tools(&mut registry, config);
 
     (Arc::new(registry), scheduler)
 }
