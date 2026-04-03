@@ -1021,41 +1021,108 @@ fn push_html_escaped(out: &mut String, text: &str) {
     }
 }
 
-/// Return true if `s` (which starts with `<` and ends with `>`) is a
-/// Telegram-supported HTML tag that should be passed through unchanged.
-fn is_telegram_html_tag(s: &str) -> bool {
-    // Strip the leading `<` (and optional `/` for closing tags)
-    let inner = if let Some(rest) = s.strip_prefix("</") {
-        rest
-    } else if let Some(rest) = s.strip_prefix('<') {
-        rest
+fn parse_telegram_tag_parts(s: &str) -> Option<(bool, String, &str)> {
+    let inner = s.strip_prefix('<')?.strip_suffix('>')?.trim();
+    let (is_closing, inner) = if let Some(rest) = inner.strip_prefix('/') {
+        (true, rest.trim_start())
     } else {
-        return false;
+        (false, inner)
     };
-    // Extract the tag name (alphanumeric prefix)
+
     let tag_name: String = inner
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
         .collect();
-    matches!(
-        tag_name.to_lowercase().as_str(),
-        "b" | "strong"
-            | "i"
-            | "em"
-            | "u"
-            | "ins"
-            | "s"
-            | "strike"
-            | "del"
-            | "code"
-            | "pre"
-            | "a"
-            | "blockquote"
-            | "tg-spoiler"
-            | "tg-emoji"
-    )
+
+    if tag_name.is_empty() {
+        return None;
+    }
+
+    let remainder = &inner[tag_name.len()..];
+    Some((is_closing, tag_name.to_lowercase(), remainder))
 }
 
+fn is_single_quoted_attr(remainder: &str, attr_name: &str) -> Option<String> {
+    let rest = remainder.trim();
+    let rest = rest.strip_prefix(attr_name)?.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+
+    let quote = if let Some(rest) = rest.strip_prefix('"') {
+        ('"', rest)
+    } else if let Some(rest) = rest.strip_prefix('\'') {
+        ('\'', rest)
+    } else {
+        return None;
+    };
+
+    let (quote_char, rest) = quote;
+    let end = rest.find(quote_char)?;
+    let value = &rest[..end];
+    let trailing = rest[end + quote_char.len_utf8()..].trim();
+
+    if trailing.is_empty() {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_single_boolean_attr(remainder: &str, attr_name: &str) -> bool {
+    remainder.trim() == attr_name
+}
+
+/// Return true if `s` is a Telegram-supported HTML tag with only
+/// Telegram-supported attributes, so it can be passed through unchanged.
+fn is_telegram_html_tag(s: &str) -> bool {
+    let Some((is_closing, tag_name, remainder)) = parse_telegram_tag_parts(s) else {
+        return false;
+    };
+
+    if is_closing {
+        return remainder.trim().is_empty()
+            && matches!(
+                tag_name.as_str(),
+                "b"
+                    | "strong"
+                    | "i"
+                    | "em"
+                    | "u"
+                    | "ins"
+                    | "s"
+                    | "strike"
+                    | "del"
+                    | "code"
+                    | "pre"
+                    | "a"
+                    | "blockquote"
+                    | "tg-spoiler"
+                    | "tg-emoji"
+            );
+    }
+
+    match tag_name.as_str() {
+        "b" | "strong" | "i" | "em" | "u" | "ins" | "s" | "strike" | "del" | "pre"
+        | "tg-spoiler" => remainder.trim().is_empty(),
+        "a" => is_single_quoted_attr(remainder, "href")
+            .map(|href| !href.is_empty())
+            .unwrap_or(false),
+        "tg-emoji" => is_single_quoted_attr(remainder, "emoji-id")
+            .map(|emoji_id| !emoji_id.is_empty() && emoji_id.chars().all(|c| c.is_ascii_digit()))
+            .unwrap_or(false),
+        "code" => {
+            let trimmed = remainder.trim();
+            trimmed.is_empty()
+                || is_single_quoted_attr(remainder, "class")
+                    .map(|class| class.starts_with("language-") && class.len() > "language-".len())
+                    .unwrap_or(false)
+        }
+        "blockquote" => {
+            let trimmed = remainder.trim();
+            trimmed.is_empty() || is_single_boolean_attr(remainder, "expandable")
+        }
+        _ => false,
+    }
+}
 /// Split a message at paragraph/line boundaries so HTML tags are not cut.
 ///
 /// Tries to split at `\n\n` (paragraph break), then at `\n` (line break),
