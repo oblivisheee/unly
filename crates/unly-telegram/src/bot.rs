@@ -1632,6 +1632,11 @@ fn is_negative_approval(text: &str) -> bool {
     )
 }
 
+/// Maximum characters shown in tool argument previews inside approval messages.
+const APPROVAL_PREVIEW_MAX_CHARS: usize = 80;
+/// Maximum characters shown in HTTP body previews inside approval messages.
+const APPROVAL_BODY_PREVIEW_MAX_CHARS: usize = 100;
+
 fn format_pending_approvals(pending: &[unly_agent::context::PendingApproval]) -> String {
     pending
         .iter()
@@ -1696,8 +1701,8 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("content")
                 .and_then(|v| v.as_str())
                 .map(|c| {
-                    let preview = c.chars().take(80).collect::<String>();
-                    if c.len() > 80 {
+                    let preview = c.chars().take(APPROVAL_PREVIEW_MAX_CHARS).collect::<String>();
+                    if c.len() > APPROVAL_PREVIEW_MAX_CHARS {
                         format!("{}…", preview)
                     } else {
                         preview
@@ -1767,8 +1772,8 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("body")
                 .map(|b| {
                     let s = b.to_string();
-                    let preview = s.chars().take(100).collect::<String>();
-                    if s.len() > 100 {
+                    let preview = s.chars().take(APPROVAL_BODY_PREVIEW_MAX_CHARS).collect::<String>();
+                    if s.len() > APPROVAL_BODY_PREVIEW_MAX_CHARS {
                         format!("{}…", preview)
                     } else {
                         preview
@@ -1842,8 +1847,8 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                         .map(|(k, v)| {
                             let val = match v {
                                 serde_json::Value::String(s) => {
-                                    let preview = s.chars().take(80).collect::<String>();
-                                    if s.len() > 80 {
+                                    let preview = s.chars().take(APPROVAL_PREVIEW_MAX_CHARS).collect::<String>();
+                                    if s.len() > APPROVAL_PREVIEW_MAX_CHARS {
                                         format!("{}…", preview)
                                     } else {
                                         preview

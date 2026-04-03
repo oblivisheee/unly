@@ -125,7 +125,13 @@ impl Scheduler {
                                             .get(id.as_str())
                                             .map(|last| *last < scheduled_at)
                                             .unwrap_or(true),
-                                        Err(_) => false,
+                                Err(_) => {
+                                            warn!(
+                                                job_id = %id,
+                                                "could not read last_dispatched map (lock contention); skipping job this tick"
+                                            );
+                                            false
+                                        }
                                     }
                                 }
                             }

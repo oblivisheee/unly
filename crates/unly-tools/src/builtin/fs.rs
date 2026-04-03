@@ -241,10 +241,24 @@ impl Tool for FsWriteTool {
 // Additional file tools
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Default maximum number of lines returned by fs_grep.
+const DEFAULT_MAX_GREP_RESULTS: usize = 100;
+
 /// Shared path validation helper: rejects `..` traversal and returns a
 /// `PathBuf` on success.
+///
+/// A `..` component check is the primary guard for all file tools.  This
+/// prevents the most common path-traversal attack vectors at the argument
+/// level before any I/O occurs.  Symlink resolution is the responsibility of
+/// the OS; callers that need strict base-directory confinement should apply
+/// an additional `canonicalize`-based check after receiving the PathBuf.
 fn validate_path(path_str: &str) -> std::result::Result<PathBuf, &'static str> {
-    if path_str.contains("..") {
+    // Reject any literal `..` path component as a traversal attempt.
+    // This covers the most common attack patterns including adjacent slashes.
+    if path_str
+        .split(['/', '\\'])
+        .any(|component| component == "..")
+    {
         return Err("path traversal not allowed");
     }
     Ok(PathBuf::from(path_str))
@@ -292,14 +306,23 @@ impl Tool for FsDeleteTool {
         };
         let recursive = args["recursive"].as_bool().unwrap_or(false);
 
-        let result = if path.is_dir() {
-            if recursive {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_dir(&path)
+        // Use symlink_metadata so we correctly handle symlinks and special
+        // files: is_dir() follows symlinks (could be wrong for a dangling
+        // symlink), while symlink_metadata().is_dir() does not.
+        let result = match std::fs::symlink_metadata(&path) {
+            Err(e) => Err(e),
+            Ok(meta) => {
+                if meta.is_dir() {
+                    if recursive {
+                        std::fs::remove_dir_all(&path)
+                    } else {
+                        std::fs::remove_dir(&path)
+                    }
+                } else {
+                    // Covers regular files, symlinks, and other special files.
+                    std::fs::remove_file(&path)
+                }
             }
-        } else {
-            std::fs::remove_file(&path)
         };
 
         match result {
@@ -494,7 +517,7 @@ impl Tool for FsMkdirTool {
                 "required": ["path"]
             }),
             risk: ToolRisk::Privileged,
-            requires_approval: false,
+            requires_approval: true,
         }
     }
 
@@ -656,7 +679,7 @@ impl Tool for FsGrepTool {
             .as_str()
             .ok_or_else(|| unly_core::Error::InvalidInput("missing path argument".to_string()))?;
         let case_insensitive = args["case_insensitive"].as_bool().unwrap_or(false);
-        let max_results = args["max_results"].as_u64().unwrap_or(100) as usize;
+        let max_results = args["max_results"].as_u64().unwrap_or(DEFAULT_MAX_GREP_RESULTS as u64) as usize;
 
         let path = match validate_path(path_str) {
             Ok(p) => p,
