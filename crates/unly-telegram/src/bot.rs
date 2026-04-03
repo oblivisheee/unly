@@ -136,7 +136,7 @@ impl TelegramBot {
                 self.sessions.remove(tg_chat_id);
                 if workspace::is_boot_mode() {
                     let boot_start = self.generate_boot_start_message(tg_user_id).await;
-                    bot.send_message(msg.chat.id, boot_start).await?;
+                    send_response_text(&bot, msg.chat.id, &boot_start).await?;
                     let _ = workspace::mark_boot_prompted();
                 } else {
                     bot.send_message(msg.chat.id, "Hello. I'm Unly. How can I help?")
@@ -274,7 +274,7 @@ Subagents are specialized execution contexts used for focused goals.",
 
                     match response {
                         Ok(AgentResponse::Text(text)) => {
-                            bot.send_message(msg.chat.id, text).await?;
+                            send_response_text(&bot, msg.chat.id, &text).await?;
                         }
                         Ok(AgentResponse::ApprovalRequired { pending }) => {
                             let names: Vec<&str> =
@@ -702,7 +702,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                         self.sessions.set(tg_chat_id, ctx);
                         match response {
                             Ok(AgentResponse::Text(text)) => {
-                                send_message_formatted(&bot, message.chat().id, text).await?;
+                                send_response_text(&bot, message.chat().id, &text).await?;
                             }
                             Ok(AgentResponse::ApprovalRequired { pending }) => {
                                 let names: Vec<&str> =
@@ -765,33 +765,316 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             self.provider_registry.default_model(),
             self.runtime.config().system_prompt.clone(),
         );
-        let prompt = "Generate one short onboarding message for first-time setup. Ask for user name, preferred communication style, and key constraints. End with: 'When you're finished, send \"done\" and I will save your configuration.' Return plain text only.";
+        let prompt = "Generate a warm, friendly first-time welcome message (3-5 sentences). \
+Introduce yourself as Unly, mention this is a one-time personalisation setup, \
+and invite the user to share: their name or preferred address, communication style (concise/detailed, formal/casual), \
+and key areas they want help with. \
+End with exactly: 'When you are done, just type done.' \
+Return plain text only, no markdown formatting.";
         match self.runtime.process(&mut ctx, prompt).await {
             Ok(AgentResponse::Text(t)) if !t.trim().is_empty() => t,
-            _ => "Hello! I'm Unly.\nSince this is our first conversation, please tell me your name, your preferred communication style, and any constraints I should follow.\n\nWhen you're finished, send \"done\" and I will save your configuration.".to_string(),
+            _ => "Hi! I'm Unly, your personal AI agent.\n\n\
+Since this is our first conversation, I'd love to get to know you a little so I can serve you better.\n\n\
+Could you tell me:\n\
+• Your name or how you'd like me to address you\n\
+• Your preferred communication style (brief and direct, or detailed explanations)\n\
+• What you mainly want to use me for\n\n\
+When you are done, just type done."
+                .to_string(),
         }
     }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Escape a string for use in Telegram HTML parse mode.
+// ── message formatting helpers ────────────────────────────────────────────────
+
+/// Convert a raw LLM response (which may contain Markdown, existing Telegram
+/// HTML tags, or plain text) to well-formed Telegram HTML.
 ///
+/// Handles, in priority order:
+///  - Fenced code blocks (```…```) → `<pre>…</pre>`
+///  - Inline code (`…`) → `<code>…</code>`
+///  - Existing Telegram HTML tags (pass through unchanged)
+///  - Bold **…** → `<b>…</b>`
+///  - Strikethrough ~~…~~ → `<s>…</s>`
+///  - Italic *…* → `<i>…</i>`
+///  - Markdown links [text](url) → `<a href="url">text</a>`
+///  - HTML-escaping of literal `&`, `<`, `>` in plain text
+fn convert_to_telegram_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 256);
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+
+    while i < n {
+        // ── Fenced code block ``` … ``` ──────────────────────────────────────
+        if i + 2 < n && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+            i += 3;
+            // skip optional language hint (everything up to the first newline)
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            if i < n {
+                i += 1; // consume the newline
+            }
+            let code_start = i;
+            let mut closed = false;
+            while i + 2 < n {
+                if chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
+                    let code: String = chars[code_start..i].iter().collect();
+                    let code = code.trim_end_matches('\n');
+                    out.push_str("<pre>");
+                    push_html_escaped(&mut out, code);
+                    out.push_str("</pre>");
+                    i += 3;
+                    closed = true;
+                    break;
+                }
+                i += 1;
+            }
+            if !closed {
+                // unclosed fence – output raw escaped content
+                let code: String = chars[code_start..i].iter().collect();
+                push_html_escaped(&mut out, &code);
+            }
+            continue;
+        }
+
+        // ── Inline code ` … ` ────────────────────────────────────────────────
+        if chars[i] == '`' {
+            let start = i + 1;
+            if let Some(j) = chars[start..].iter().position(|&c| c == '`') {
+                let code: String = chars[start..start + j].iter().collect();
+                out.push_str("<code>");
+                push_html_escaped(&mut out, &code);
+                out.push_str("</code>");
+                i = start + j + 1;
+                continue;
+            }
+        }
+
+        // ── Existing Telegram HTML tag – pass through ─────────────────────────
+        if chars[i] == '<' {
+            // Search for the closing '>' directly in the chars slice.
+            if let Some(tag_len) = chars[i..].iter().position(|&c| c == '>') {
+                // Build only the candidate tag string (typically very short).
+                let candidate: String = chars[i..=i + tag_len].iter().collect();
+                if is_telegram_html_tag(&candidate) {
+                    out.push_str(&candidate);
+                    i += tag_len + 1;
+                    continue;
+                }
+            }
+            // Not a known Telegram tag – escape the '<'
+            out.push_str("&lt;");
+            i += 1;
+            continue;
+        }
+
+        // ── Bold **…** ────────────────────────────────────────────────────────
+        if i + 1 < n && chars[i] == '*' && chars[i + 1] == '*' {
+            let start = i + 2;
+            let inner = &chars[start..];
+            if let Some(j) = inner.windows(2).position(|w| w[0] == '*' && w[1] == '*') {
+                let txt: String = inner[..j].iter().collect();
+                out.push_str("<b>");
+                push_html_escaped(&mut out, &txt);
+                out.push_str("</b>");
+                i = start + j + 2;
+                continue;
+            }
+        }
+
+        // ── Strikethrough ~~…~~ ───────────────────────────────────────────────
+        if i + 1 < n && chars[i] == '~' && chars[i + 1] == '~' {
+            let start = i + 2;
+            let inner = &chars[start..];
+            if let Some(j) = inner.windows(2).position(|w| w[0] == '~' && w[1] == '~') {
+                let txt: String = inner[..j].iter().collect();
+                out.push_str("<s>");
+                push_html_escaped(&mut out, &txt);
+                out.push_str("</s>");
+                i = start + j + 2;
+                continue;
+            }
+        }
+
+        // ── Italic *…* ────────────────────────────────────────────────────────
+        if chars[i] == '*' && (i + 1 >= n || chars[i + 1] != '*') {
+            let start = i + 1;
+            if let Some(j) = chars[start..].iter().position(|&c| c == '*') {
+                if j > 0 {
+                    let txt: String = chars[start..start + j].iter().collect();
+                    out.push_str("<i>");
+                    push_html_escaped(&mut out, &txt);
+                    out.push_str("</i>");
+                    i = start + j + 1;
+                    continue;
+                }
+            }
+        }
+
+        // ── Markdown link [text](url) ─────────────────────────────────────────
+        if chars[i] == '[' {
+            let text_start = i + 1;
+            if let Some(bracket_close) = chars[text_start..].iter().position(|&c| c == ']') {
+                let after = text_start + bracket_close + 1;
+                if after < n && chars[after] == '(' {
+                    let url_start = after + 1;
+                    if let Some(paren_close) = chars[url_start..].iter().position(|&c| c == ')') {
+                        let link_text: String = chars[text_start..text_start + bracket_close]
+                            .iter()
+                            .collect();
+                        let url: String =
+                            chars[url_start..url_start + paren_close].iter().collect();
+                        out.push_str("<a href=\"");
+                        push_html_escaped(&mut out, &url);
+                        out.push_str("\">");
+                        push_html_escaped(&mut out, &link_text);
+                        out.push_str("</a>");
+                        i = url_start + paren_close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // ── Plain text: escape special HTML chars ─────────────────────────────
+        if chars[i] == '&' {
+            // Pass through already-escaped HTML entities by peeking at the next chars.
+            let rest = &chars[i..];
+            let is_entity = matches!(
+                rest.get(..6).map(|s| s as &[char]),
+                Some(['&', 'a', 'm', 'p', ';', _] | ['&', 'q', 'u', 'o', 't', ';'])
+            ) || matches!(
+                rest.get(..4).map(|s| s as &[char]),
+                Some(['&', 'l', 't', ';'] | ['&', 'g', 't', ';'])
+            ) || matches!(rest.get(..3).map(|s| s as &[char]), Some(['&', '#', _]));
+            if is_entity {
+                out.push('&');
+            } else {
+                out.push_str("&amp;");
+            }
+            i += 1;
+            continue;
+        }
+
+        if chars[i] == '>' {
+            out.push_str("&gt;");
+            i += 1;
+            continue;
+        }
+
+        out.push(chars[i]);
+        i += 1;
+    }
+
+    out
+}
+
+/// HTML-escape a string (for use inside code blocks and attribute values).
+fn push_html_escaped(out: &mut String, text: &str) {
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Return true if `s` (which starts with `<` and ends with `>`) is a
+/// Telegram-supported HTML tag that should be passed through unchanged.
+fn is_telegram_html_tag(s: &str) -> bool {
+    // Strip the leading `<` (and optional `/` for closing tags)
+    let inner = if let Some(rest) = s.strip_prefix("</") {
+        rest
+    } else if let Some(rest) = s.strip_prefix('<') {
+        rest
+    } else {
+        return false;
+    };
+    // Extract the tag name (alphanumeric prefix)
+    let tag_name: String = inner
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    matches!(
+        tag_name.to_lowercase().as_str(),
+        "b" | "strong"
+            | "i"
+            | "em"
+            | "u"
+            | "ins"
+            | "s"
+            | "strike"
+            | "del"
+            | "code"
+            | "pre"
+            | "a"
+            | "blockquote"
+            | "tg-spoiler"
+            | "tg-emoji"
+    )
+}
+
+/// Split a message at paragraph/line boundaries so HTML tags are not cut.
+///
+/// Tries to split at `\n\n` (paragraph break), then at `\n` (line break),
+/// and as a last resort at a safe UTF-8 character boundary near `max_len`.
+fn split_at_boundary(text: &str, max_len: usize) -> Vec<String> {
+    if text.len() <= max_len {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+
+    while remaining.len() > max_len {
+        // Find the largest UTF-8 char boundary that fits within max_len bytes.
+        let safe_end = (0..=max_len.min(remaining.len()))
+            .rev()
+            .find(|&i| remaining.is_char_boundary(i))
+            .unwrap_or(0);
+
+        if safe_end == 0 {
+            break; // Pathological input – give up rather than loop forever.
+        }
+
+        let window = &remaining[..safe_end];
+
+        // Prefer a paragraph break, then a line break, then a hard cut.
+        let split_pos = window
+            .rfind("\n\n")
+            .or_else(|| window.rfind('\n'))
+            .unwrap_or(safe_end);
+
+        if split_pos == 0 {
+            // No newline found within the window – hard cut at the safe boundary.
+            chunks.push(remaining[..safe_end].to_string());
+            remaining = &remaining[safe_end..];
+        } else {
+            chunks.push(remaining[..split_pos].to_string());
+            remaining = remaining[split_pos..].trim_start_matches('\n');
+        }
+    }
+
+    if !remaining.is_empty() {
+        chunks.push(remaining.to_string());
+    }
+
+    chunks
+}
+
 #[derive(Debug, Clone)]
 struct SubagentStatusRow {
     id: String,
     status: String,
     depth: i32,
     model: Option<String>,
-}
-
-/// Split a message into chunks that fit within Telegram's limit.
-fn split_message(text: &str, max_len: usize) -> Vec<String> {
-    if text.len() <= max_len {
-        return vec![text.to_string()];
-    }
-    let chars: Vec<char> = text.chars().collect();
-    chars.chunks(max_len).map(|c| c.iter().collect()).collect()
 }
 
 async fn send_response_text(
@@ -802,15 +1085,17 @@ async fn send_response_text(
     if text.is_empty() {
         return Ok(());
     }
-    if text.len() <= 4000 {
-        return send_message_formatted(bot, chat_id, text.to_string()).await;
+
+    let html = convert_to_telegram_html(text);
+
+    if html.len() <= 4000 {
+        return send_message_formatted(bot, chat_id, html).await;
     }
 
-    // HTML parsing can fail when entities are split across chunks.
-    // For long messages, send plain chunks for reliable delivery.
-    for chunk in split_message(text, 4000) {
+    // Long message: split at natural boundaries and send each chunk with HTML.
+    for chunk in split_at_boundary(&html, 4000) {
         if !chunk.is_empty() {
-            bot.send_message(chat_id, chunk).await?;
+            send_message_formatted(bot, chat_id, chunk).await?;
         }
     }
     Ok(())
@@ -855,6 +1140,143 @@ async fn send_message_formatted(
         Err(_) => {
             bot.send_message(chat_id, text).await?;
             Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_html_escape() {
+        let mut out = String::new();
+        push_html_escaped(&mut out, "a & b < c > d \"e\"");
+        assert_eq!(out, "a &amp; b &lt; c &gt; d &quot;e&quot;");
+    }
+
+    #[test]
+    fn test_convert_fenced_code_block() {
+        let input = "```rust\nfn main() {}\n```";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "<pre>fn main() {}</pre>");
+    }
+
+    #[test]
+    fn test_convert_inline_code() {
+        let input = "Use `cargo build` to compile.";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "Use <code>cargo build</code> to compile.");
+    }
+
+    #[test]
+    fn test_convert_bold() {
+        let input = "This is **bold** text.";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "This is <b>bold</b> text.");
+    }
+
+    #[test]
+    fn test_convert_italic() {
+        let input = "This is *italic* text.";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "This is <i>italic</i> text.");
+    }
+
+    #[test]
+    fn test_convert_strikethrough() {
+        let input = "This is ~~strikethrough~~ text.";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "This is <s>strikethrough</s> text.");
+    }
+
+    #[test]
+    fn test_convert_link() {
+        let input = "See [docs](https://example.com) for details.";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(
+            html,
+            "See <a href=\"https://example.com\">docs</a> for details."
+        );
+    }
+
+    #[test]
+    fn test_passthrough_existing_html_tags() {
+        let input = "Hello <b>world</b> and <code>code</code>.";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "Hello <b>world</b> and <code>code</code>.");
+    }
+
+    #[test]
+    fn test_escape_plain_text_special_chars() {
+        let input = "a & b, x < y, p > q";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "a &amp; b, x &lt; y, p &gt; q");
+    }
+
+    #[test]
+    fn test_escape_unknown_html_tag() {
+        // Unknown tags should be escaped, not passed through.
+        let input = "Use <script>alert(1)</script>";
+        let html = convert_to_telegram_html(input);
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn test_is_telegram_html_tag() {
+        assert!(is_telegram_html_tag("<b>"));
+        assert!(is_telegram_html_tag("</b>"));
+        assert!(is_telegram_html_tag("<code>"));
+        assert!(is_telegram_html_tag("<a href=\"url\">"));
+        assert!(!is_telegram_html_tag("<script>"));
+        assert!(!is_telegram_html_tag("<div>"));
+    }
+
+    #[test]
+    fn test_split_at_boundary_short_message() {
+        let text = "short message";
+        let chunks = split_at_boundary(text, 100);
+        assert_eq!(chunks, vec!["short message"]);
+    }
+
+    #[test]
+    fn test_split_at_boundary_long_message() {
+        let line = "a".repeat(100);
+        let text = format!("{}\n{}\n{}", line, line, line);
+        // Total length = 302; with max_len=150, each 100-char line is split individually.
+        let chunks = split_at_boundary(&text, 150);
+        // Each chunk must fit within the limit
+        for chunk in &chunks {
+            assert!(chunk.len() <= 150, "chunk too long: {}", chunk.len());
+        }
+        // All chunks combined should contain all the content
+        let combined = chunks.join("\n");
+        assert!(combined.contains(&line));
+    }
+
+    #[test]
+    fn test_split_at_boundary_hard_cut() {
+        // No newlines: must fall back to hard-cut at the safe UTF-8 boundary.
+        let text = "a".repeat(500);
+        let chunks = split_at_boundary(&text, 100);
+        assert_eq!(chunks.len(), 5);
+        for chunk in &chunks {
+            assert_eq!(chunk.len(), 100);
+        }
+    }
+
+    #[test]
+    fn test_split_at_boundary_unicode_safe() {
+        // Each '💡' emoji is 4 bytes. 10 emojis = 40 bytes.
+        // With max_len=15 (not on a char boundary after the 3rd emoji at byte 12),
+        // the function must not panic and must not produce a broken string.
+        let text = "💡".repeat(10);
+        let chunks = split_at_boundary(&text, 15);
+        for chunk in &chunks {
+            // Every chunk must be valid UTF-8 (String from a &str is always valid,
+            // but the slice boundary must be correct).
+            assert!(!chunk.is_empty());
+            assert!(chunk.chars().all(|c| c == '💡'));
         }
     }
 }

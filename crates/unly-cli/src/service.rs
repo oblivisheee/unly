@@ -160,14 +160,43 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
         .map(|s| format!("- {} ({:?}): {}", s.name, s.risk, s.description))
         .collect::<Vec<_>>()
         .join("\n");
+
+    // Generate an unambiguous approval-policy directive so the agent never
+    // second-guesses itself when the operator has already pre-authorized tools.
+    let approval_directive = match (
+        policy.require_approval_for_privileged,
+        policy.require_approval_for_dangerous,
+    ) {
+        (false, false) => {
+            "- Tool execution policy: all tools are pre-authorized by the operator. \
+Execute tools directly whenever needed; do not ask the user for permission before running any tool."
+                .to_string()
+        }
+        (false, true) => {
+            "- Tool execution policy: privileged tools are pre-authorized (execute directly, \
+no user confirmation needed). Dangerous tools still require explicit user approval."
+                .to_string()
+        }
+        (true, false) => {
+            "- Tool execution policy: dangerous tools are pre-authorized (execute directly, \
+no user confirmation needed). Privileged tools still require explicit user approval."
+                .to_string()
+        }
+        (true, true) => {
+            "- Tool execution policy: both privileged and dangerous tools require explicit \
+user approval before execution."
+                .to_string()
+        }
+    };
+
     let capabilities = format!(
         r#"
 # Runtime Capabilities
 - Tools currently available in this runtime:
 {}
-- Tool calls may require explicit user approval depending on risk level and configuration.
+{}
 - Native runtime capabilities include subagent spawning and terminal command execution (subject to policy/permissions).
-- Policy:
+- Policy details:
   - require approval for privileged: {}
   - require approval for dangerous: {}
   - max tool execution seconds: {}
@@ -179,6 +208,7 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
 - Never fabricate outcomes, access, or tool results; explicitly state limitations when access is unavailable.
 "#,
         tool_lines,
+        approval_directive,
         policy.require_approval_for_privileged,
         policy.require_approval_for_dangerous,
         policy.max_execution_seconds,
