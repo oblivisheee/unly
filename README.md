@@ -13,12 +13,13 @@ Unly is a Rust-based platform that turns any Telegram chat into an agentic AI as
 - **Telegram-first interface** — talk to your agent through any Telegram client
 - **Semantic memory** — remembers past conversations using vector similarity search (SQLite-backed, no external DB)
 - **Multi-provider LLM** — GitHub Copilot out of the box, plus any OpenAI-compatible API (OpenAI, Ollama, etc.)
-- **Agentic tool execution** — HTTP requests, file I/O, git inspection, shell commands
+- **Agentic tool execution** — HTTP, extended file tools, git inspection, shell/bash, subagents, cron jobs
 - **Approval workflow** — manual approvals by default, with per-chat `/approval auto` and setup-time full-access mode
-- **Security by default** — allowlist-based access control, audit trail, secret redaction, shell disabled unless configured
+- **Security by default** — allowlist-based access control, audit trail, secret redaction, and policy-gated tool risks
 - **Job scheduler** — cron-based background tasks
 - **Plugin system** — extend capabilities with your own Rust plugins
 - **Append-only audit log** — every tool call, approval, and denial is recorded
+- **Workspace-home runtime** — config/data/identity live under `UNLY_HOME` (default `~/.unly`)
 
 ---
 
@@ -50,6 +51,22 @@ After the build completes, the onboarding wizard (`unly setup`) will guide you t
 ## Configuration
 
 The `config.toml` file controls every aspect of the agent. Below are the most important sections.
+
+### Workspace paths
+
+By default, runtime files are stored in `~/.unly` (override with `UNLY_HOME`):
+
+```text
+~/.unly/
+  config.toml
+  data/unly.sqlite
+  data/github_token.json
+  IDENTITY.md
+  SOUL.md
+  TOOLS.md
+  MEMORY.md
+  memory/state.md
+```
 
 ### Telegram access control
 
@@ -107,7 +124,9 @@ disabled_tools                  = []
 require_approval_for_privileged = true    # set false to execute privileged tools immediately
 require_approval_for_dangerous  = true    # set false to execute dangerous tools immediately
 max_execution_seconds           = 30
-shell_allowlist                 = []      # empty = shell disabled entirely
+max_concurrent_executions       = 4
+shell_allowlist                 = ["^ls(\\s|$)", "^pwd(\\s|$)", "^cat\\s+", "^echo\\s+"]
+# set shell_allowlist = [] to disable shell/bash execution
 ```
 
 Approval behavior:
@@ -123,17 +142,28 @@ Approval behavior:
 | `http_post` | Privileged | HTTP POST request |
 | `fs_read` | Safe | Read a file |
 | `fs_list` | Safe | List directory contents |
+| `fs_write` | Privileged | Write/append text to a file |
+| `fs_delete` | Dangerous | Delete file or directory |
+| `fs_copy` | Privileged | Copy file or directory |
+| `fs_move` | Privileged | Move/rename file or directory |
+| `fs_mkdir` | Privileged | Create directories |
+| `fs_stat` | Safe | Show file metadata |
+| `fs_grep` | Safe | Search text in files |
 | `git_status` | Safe | `git status` output |
 | `git_log` | Safe | `git log` output |
-| `shell` | Dangerous | Execute a shell command |
+| `shell` / `bash` | Dangerous | Execute shell commands (allowlist-checked) |
+| `spawn_subagent` | Privileged | Delegate a task to a subagent |
+| `cron_job` | Privileged | Manage scheduled background jobs |
 
 ### Agent behaviour
 
 ```toml
 [agent]
-system_prompt          = "You are a helpful personal assistant."
+max_subagent_depth      = 3
+max_concurrent_subagents = 4
 max_tool_calls_per_turn = 10
-max_turns              = 100
+max_turns               = 100
+use_file_memory_primary = true
 ```
 
 ### Semantic memory
@@ -151,6 +181,19 @@ memory_retention_days = 0    # 0 = keep memories forever
 
 For the full configuration reference, see [docs/setup.md](docs/setup.md).
 
+### Plugins
+
+```toml
+[plugins]
+plugins_dir = "~/.unly/plugins"
+allow_unknown = false
+enabled = ["com.unly.random-fortune"]  # include to force-enable
+disabled = []                          # add plugin IDs here to disable
+```
+
+Built-in plugin currently wired into runtime:
+- `com.unly.random-fortune` — adds Telegram command `/fortune`
+
 ---
 
 ## Telegram Bot Commands
@@ -160,18 +203,13 @@ For the full configuration reference, see [docs/setup.md](docs/setup.md).
 | `/start` | All | Begin a new session |
 | `/help` | All | Show available commands |
 | `/status` | All | Current provider, model, and session info |
-| `/models` | All | List available models |
 | `/model <name>` | All | Switch to a different model |
 | `/provider <name>` | All | Switch to a different provider |
+| `/subagents` | All | Show active subagents and statuses |
 | `/approve` | All | Approve pending tool calls (manual mode) |
 | `/deny` | All | Deny pending tool calls (manual mode) |
 | `/approval <manual\\|auto>` | All | Switch per-chat approval mode |
 | `/reset` | All | Clear conversation context |
-| `/memory list` | All | Show stored memory entries |
-| `/memory prune` | All | Delete old memory entries |
-| `/audit` | Admin | Show recent audit log |
-| `/jobs` | Admin | List scheduled jobs |
-| `/plugin` | Admin | List installed plugins |
 
 ---
 
@@ -234,10 +272,15 @@ A ready-made systemd unit file is provided in [`deploy/`](deploy/). It includes 
 After the first run, Unly creates the following files:
 
 ```
-data/
-  unly.sqlite            # SQLite database (WAL mode)
-  github_token.json      # Cached GitHub OAuth token (mode 600)
-config.toml              # Main configuration
+$UNLY_HOME (default: ~/.unly)/
+  config.toml              # Main configuration
+  data/unly.sqlite         # SQLite database (WAL mode)
+  data/github_token.json   # Cached GitHub OAuth token (mode 600)
+  IDENTITY.md              # Core runtime identity prompt
+  SOUL.md                  # Runtime behavior contract
+  TOOLS.md                 # Tool-use contract
+  MEMORY.md                # Canonical memory index
+  memory/state.md          # Rolling memory shard
 ```
 
 ---
