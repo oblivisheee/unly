@@ -1050,47 +1050,228 @@ fn is_telegram_html_tag(s: &str) -> bool {
 ///
 /// Tries to split at `\n\n` (paragraph break), then at `\n` (line break),
 /// and as a last resort at a safe UTF-8 character boundary near `max_len`.
+#[derive(Clone)]
+struct HtmlOpenTag {
+    name: String,
+    open_token: String,
+}
+
+#[derive(Clone)]
+enum HtmlToken {
+    Tag(String),
+    Entity(String),
+    Text(String),
+}
+
+fn tokenize_html_for_telegram(text: &str) -> Vec<HtmlToken> {
+    let mut tokens = Vec::new();
+    let mut i = 0;
+
+    while i < text.len() {
+        let remaining = &text[i..];
+
+        if remaining.starts_with('<') {
+            if let Some(end) = remaining.find('>') {
+                let token = &remaining[..=end];
+                tokens.push(HtmlToken::Tag(token.to_string()));
+                i += token.len();
+                continue;
+            }
+        }
+
+        if remaining.starts_with('&') {
+            if let Some(end) = remaining.find(';') {
+                let candidate = &remaining[..=end];
+                if !candidate.contains('<') && !candidate.contains('>') && !candidate.contains('\n')
+                {
+                    tokens.push(HtmlToken::Entity(candidate.to_string()));
+                    i += candidate.len();
+                    continue;
+                }
+            }
+        }
+
+        let ch = remaining.chars().next().unwrap();
+        tokens.push(HtmlToken::Text(ch.to_string()));
+        i += ch.len_utf8();
+    }
+
+    tokens
+}
+
+fn parse_html_open_tag(tag: &str) -> Option<HtmlOpenTag> {
+    if !tag.starts_with('<') || !tag.ends_with('>') {
+        return None;
+    }
+
+    let inner = tag[1..tag.len() - 1].trim();
+    if inner.is_empty()
+        || inner.starts_with('/')
+        || inner.starts_with('!')
+        || inner.starts_with('?')
+        || inner.ends_with('/')
+    {
+        return None;
+    }
+
+    let name: String = inner
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    if name.is_empty() {
+        return None;
+    }
+
+    Some(HtmlOpenTag {
+        name,
+        open_token: tag.to_string(),
+    })
+}
+
+fn parse_html_close_tag_name(tag: &str) -> Option<String> {
+    if !tag.starts_with("</") || !tag.ends_with('>') {
+        return None;
+    }
+
+    let inner = tag[2..tag.len() - 1].trim();
+    let name: String = inner
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+fn apply_html_token_to_stack(stack: &mut Vec<HtmlOpenTag>, token: &HtmlToken) {
+    if let HtmlToken::Tag(tag) = token {
+        if let Some(close_name) = parse_html_close_tag_name(tag) {
+            if let Some(pos) = stack.iter().rposition(|open| open.name == close_name) {
+                stack.truncate(pos);
+            }
+        } else if let Some(open_tag) = parse_html_open_tag(tag) {
+            stack.push(open_tag);
+        }
+    }
+}
+
+fn reopen_tags_html(stack: &[HtmlOpenTag]) -> String {
+    stack.iter().map(|tag| tag.open_token.as_str()).collect()
+}
+
+fn close_tags_html(stack: &[HtmlOpenTag]) -> String {
+    stack
+        .iter()
+        .rev()
+        .map(|tag| format!("</{}>", tag.name))
+        .collect()
+}
+
 fn split_at_boundary(text: &str, max_len: usize) -> Vec<String> {
     if text.len() <= max_len {
         return vec![text.to_string()];
     }
 
+    let tokens = tokenize_html_for_telegram(text);
     let mut chunks = Vec::new();
-    let mut remaining = text;
+    let mut i = 0;
+    let mut carry_stack: Vec<HtmlOpenTag> = Vec::new();
 
-    while remaining.len() > max_len {
-        // Find the largest UTF-8 char boundary that fits within max_len bytes.
-        let safe_end = (0..=max_len.min(remaining.len()))
-            .rev()
-            .find(|&i| remaining.is_char_boundary(i))
-            .unwrap_or(0);
+    while i < tokens.len() {
+        let mut current = reopen_tags_html(&carry_stack);
+        let mut current_stack = carry_stack.clone();
+        let mut last_break: Option<(usize, String, Vec<HtmlOpenTag>)> = None;
 
-        if safe_end == 0 {
-            break; // Pathological input – give up rather than loop forever.
+        while i < tokens.len() {
+            let token_str = match &tokens[i] {
+                HtmlToken::Tag(s) | HtmlToken::Entity(s) | HtmlToken::Text(s) => s.as_str(),
+            };
+
+            let mut next_stack = current_stack.clone();
+            apply_html_token_to_stack(&mut next_stack, &tokens[i]);
+            let projected_len = current.len() + token_str.len() + close_tags_html(&next_stack).len();
+
+            if projected_len <= max_len || current == reopen_tags_html(&carry_stack) {
+                current.push_str(token_str);
+                current_stack = next_stack;
+                i += 1;
+
+                if current.ends_with("\n\n") || current.ends_with('\n') {
+                    last_break = Some((i, current.clone(), current_stack.clone()));
+                }
+            } else {
+                break;
+            }
         }
 
-        let window = &remaining[..safe_end];
+        if i < tokens.len() {
+            if let Some((break_i, break_current, break_stack)) = last_break.clone() {
+                let chunk = format!("{}{}", break_current, close_tags_html(&break_stack));
+                chunks.push(chunk);
+                i = break_i;
+                carry_stack = break_stack;
+                continue;
+            }
 
-        // Prefer a paragraph break, then a line break, then a hard cut.
-        let split_pos = window
-            .rfind("\n\n")
-            .or_else(|| window.rfind('\n'))
-            .unwrap_or(safe_end);
+            if current == reopen_tags_html(&carry_stack) {
+                let token_str = match &tokens[i] {
+                    HtmlToken::Tag(s) | HtmlToken::Entity(s) | HtmlToken::Text(s) => s.as_str(),
+                };
 
-        if split_pos == 0 {
-            // No newline found within the window – hard cut at the safe boundary.
-            chunks.push(remaining[..safe_end].to_string());
-            remaining = &remaining[safe_end..];
+                if let HtmlToken::Text(_) = &tokens[i] {
+                    let available = max_len.saturating_sub(current.len() + close_tags_html(&current_stack).len());
+                    let split_end = (0..=available.min(token_str.len()))
+                        .rev()
+                        .find(|&idx| token_str.is_char_boundary(idx))
+                        .unwrap_or(0);
+
+                    if split_end > 0 {
+                        current.push_str(&token_str[..split_end]);
+                        let chunk = format!("{}{}", current, close_tags_html(&current_stack));
+                        chunks.push(chunk);
+
+                        let remainder = &token_str[split_end..];
+                        if !remainder.is_empty() {
+                            let mut remaining_tokens = Vec::with_capacity(tokens.len() - i);
+                            remaining_tokens.push(HtmlToken::Text(remainder.to_string()));
+                            remaining_tokens.extend_from_slice(&tokens[i + 1..]);
+                            let mut rebuilt = Vec::with_capacity(i + remaining_tokens.len());
+                            rebuilt.extend_from_slice(&tokens[..i]);
+                            rebuilt.extend(remaining_tokens);
+                            return {
+                                let mut recursive_chunks = chunks;
+                                recursive_chunks.extend(split_at_boundary(
+                                    &rebuilt
+                                        .into_iter()
+                                        .map(|token| match token {
+                                            HtmlToken::Tag(s)
+                                            | HtmlToken::Entity(s)
+                                            | HtmlToken::Text(s) => s,
+                                        })
+                                        .collect::<String>(),
+                                    max_len,
+                                ));
+                                recursive_chunks
+                            };
+                        }
+                    }
+                }
+            }
+
+            let chunk = format!("{}{}", current, close_tags_html(&current_stack));
+            chunks.push(chunk);
+            carry_stack = current_stack;
         } else {
-            chunks.push(remaining[..split_pos].to_string());
-            remaining = remaining[split_pos..].trim_start_matches('\n');
+            let chunk = format!("{}{}", current, close_tags_html(&current_stack));
+            if !chunk.is_empty() {
+                chunks.push(chunk);
+            }
         }
     }
-
-    if !remaining.is_empty() {
-        chunks.push(remaining.to_string());
-    }
-
     chunks
 }
 
