@@ -9,6 +9,7 @@ use tracing::info;
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config, workspace};
 use unly_db::Database;
+use unly_plugins::SkillLoader;
 use unly_providers::copilot::{CopilotProvider, DevicePollResult};
 use unly_telegram::{SessionStore, TelegramBot};
 
@@ -99,12 +100,28 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
-    /// List installed plugins.
+    /// List installed skills.
     List,
-    /// Enable a plugin.
-    Enable { id: String },
-    /// Disable a plugin.
-    Disable { id: String },
+    /// Install a skill from a local directory.
+    Install {
+        /// Path to the skill directory (must contain a SKILL.md file).
+        path: PathBuf,
+    },
+    /// Remove an installed skill by its directory name.
+    Remove {
+        /// Skill directory name (as shown by `unly plugin list`).
+        id: String,
+    },
+    /// Enable a previously disabled skill.
+    Enable {
+        /// Skill directory name.
+        id: String,
+    },
+    /// Disable a skill (keeps it installed but inactive).
+    Disable {
+        /// Skill directory name.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -374,20 +391,71 @@ impl Cli {
 
             Commands::Plugin(cmd) => match cmd {
                 PluginCommands::List => {
-                    println!("Plugin management via CLI: use unly plugin list");
-                    println!("No plugins currently installed.");
-                    println!("\nTo install a plugin, see docs/plugins.md");
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    let skills = SkillLoader::load_from_dir(skills_dir);
+                    if skills.is_empty() {
+                        println!("No skills installed.");
+                        println!(
+                            "\nInstall a skill with:  unly plugin install <path-to-skill-dir>"
+                        );
+                    } else {
+                        println!(
+                            "{:<30} {:<10} Description",
+                            "Name", "Status"
+                        );
+                        println!("{}", "-".repeat(80));
+                        for s in &skills {
+                            let status = if s.enabled { "enabled" } else { "disabled" };
+                            println!(
+                                "{:<30} {:<10} {}",
+                                s.meta.name, status, s.meta.description
+                            );
+                        }
+                        println!("\nSkills directory: {}", skills_dir.display());
+                    }
+                    Ok(())
+                }
+                PluginCommands::Install { path } => {
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    let src = std::fs::canonicalize(&path).with_context(|| {
+                        format!("path does not exist: {}", path.display())
+                    })?;
+                    match SkillLoader::install(&src, skills_dir) {
+                        Ok(name) => {
+                            println!("Skill '{}' installed successfully.", name);
+                            println!("Skills directory: {}", skills_dir.display());
+                        }
+                        Err(e) => bail!("{}", e),
+                    }
+                    Ok(())
+                }
+                PluginCommands::Remove { id } => {
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    match SkillLoader::remove(&id, skills_dir) {
+                        Ok(()) => println!("Skill '{}' removed.", id),
+                        Err(e) => bail!("{}", e),
+                    }
                     Ok(())
                 }
                 PluginCommands::Enable { id } => {
-                    println!("Plugin enable: {} (update config.toml plugins.enabled)", id);
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    match SkillLoader::enable(&id, skills_dir) {
+                        Ok(()) => println!("Skill '{}' enabled.", id),
+                        Err(e) => bail!("{}", e),
+                    }
                     Ok(())
                 }
                 PluginCommands::Disable { id } => {
-                    println!(
-                        "Plugin disable: {} (update config.toml plugins.disabled)",
-                        id
-                    );
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    match SkillLoader::disable(&id, skills_dir) {
+                        Ok(()) => println!("Skill '{}' disabled.", id),
+                        Err(e) => bail!("{}", e),
+                    }
                     Ok(())
                 }
             },

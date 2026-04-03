@@ -161,12 +161,18 @@ fn apply_boot_preferences_to_prompt_file(
     std::fs::write(path, updated)
 }
 
+/// Return the default directory where user-installed skills are stored.
+pub fn skills_dir() -> PathBuf {
+    workspace_dir().join("skills")
+}
+
 /// Ensure the workspace directory (and its sub-directories) exist.
 pub fn ensure_workspace() -> std::io::Result<()> {
     let ws = workspace_dir();
     std::fs::create_dir_all(ws.join("data"))?;
     std::fs::create_dir_all(ws.join("memory"))?;
     std::fs::create_dir_all(ws.join("subagents").join("logs"))?;
+    std::fs::create_dir_all(ws.join("skills"))?;
     Ok(())
 }
 

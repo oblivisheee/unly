@@ -329,6 +329,8 @@ impl Default for SchedulerConfig {
 pub struct PluginsConfig {
     /// Directory to load plugins from.
     pub plugins_dir: PathBuf,
+    /// Directory to load skills from.
+    pub skills_dir: PathBuf,
     /// Whether unknown plugins are allowed (false = only listed plugins).
     pub allow_unknown: bool,
     /// Explicitly enabled plugin IDs.
@@ -341,6 +343,7 @@ impl Default for PluginsConfig {
     fn default() -> Self {
         Self {
             plugins_dir: workspace::workspace_dir().join("plugins"),
+            skills_dir: workspace::skills_dir(),
             allow_unknown: false,
             enabled: Vec::new(),
             disabled: Vec::new(),

@@ -6,6 +6,7 @@ use unly_audit::AuditLogger;
 use unly_config::{workspace, AppConfig};
 use unly_db::Database;
 use unly_memory::MemoryStore;
+use unly_plugins::SkillLoader;
 use unly_providers::{
     copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
 };
@@ -176,7 +177,10 @@ pub fn build_tools_with_scheduler(
 /// If these files don't exist in the workspace, bundled defaults are used.
 /// This function also writes the default files if they are absent, so the user
 /// can discover and customise them.
-pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
+///
+/// Active skills found in the configured skills directory are appended as an
+/// additional `# Skills` section so the agent knows about them at runtime.
+pub fn load_system_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> String {
     let id_path = workspace::identity_path();
     let soul_path = workspace::soul_path();
     let boot_path = workspace::boot_path();
@@ -229,6 +233,26 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
         std::fs::read_to_string(&boot_path).unwrap_or_else(|_| workspace::DEFAULT_BOOT.to_string())
     } else {
         String::new()
+    };
+
+    // Load enabled skills and build a skills section for the prompt.
+    let skills_section = {
+        let skills = SkillLoader::load_from_dir(&config.plugins.skills_dir);
+        let active: Vec<_> = skills.into_iter().filter(|s| s.enabled).collect();
+        if active.is_empty() {
+            String::new()
+        } else {
+            let mut section = "# Skills\n\nThe following skills are available and their instructions should be followed when relevant:\n\n".to_string();
+            for skill in &active {
+                section.push_str(&format!(
+                    "## {} — {}\n\n{}\n\n",
+                    skill.meta.name,
+                    skill.meta.description,
+                    skill.instructions.trim()
+                ));
+            }
+            section
+        }
     };
 
     let policy = tool_registry.policy();
@@ -303,22 +327,45 @@ For cron tasks, prefer the native `cron_job` tool. For delegated execution, pref
     );
 
     if boot_mode {
-        format!(
-            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-            identity.trim(),
-            soul.trim(),
-            tools_profile.trim(),
-            memory_index.trim(),
-            boot.trim(),
-            capabilities.trim()
-        )
-    } else {
+        if skills_section.is_empty() {
+            format!(
+                "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
+                identity.trim(),
+                soul.trim(),
+                tools_profile.trim(),
+                memory_index.trim(),
+                boot.trim(),
+                capabilities.trim()
+            )
+        } else {
+            format!(
+                "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
+                identity.trim(),
+                soul.trim(),
+                tools_profile.trim(),
+                memory_index.trim(),
+                boot.trim(),
+                skills_section.trim(),
+                capabilities.trim()
+            )
+        }
+    } else if skills_section.is_empty() {
         format!(
             "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
             identity.trim(),
             soul.trim(),
             tools_profile.trim(),
             memory_index.trim(),
+            capabilities.trim()
+        )
+    } else {
+        format!(
+            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
+            identity.trim(),
+            soul.trim(),
+            tools_profile.trim(),
+            memory_index.trim(),
+            skills_section.trim(),
             capabilities.trim()
         )
     }
@@ -332,7 +379,7 @@ pub fn build_runtime(
     db: Database,
     audit: Option<Arc<AuditLogger>>,
 ) -> Arc<AgentRuntime> {
-    let system_prompt = load_system_prompt(tool_registry.as_ref());
+    let system_prompt = load_system_prompt(tool_registry.as_ref(), config);
     let memory_store = if config.memory.enabled {
         provider_registry
             .get(&config.memory.embedding_provider)
