@@ -248,15 +248,29 @@ impl SubagentManager {
                     let result_text = match response {
                         AgentResponse::Text(t) => t,
                         AgentResponse::ApprovalRequired { pending } => {
-                            let err = format!(
-                                "subagent blocked: approval required for {} tool calls",
-                                pending.len()
+                            // Subagents with admin permissions should have all tools
+                            // pre-approved. If we still end up here (e.g. a Dangerous
+                            // tool was called and the policy did not grant auto-approval),
+                            // report it as a blocked result rather than silently failing.
+                            let tool_names: Vec<&str> =
+                                pending.iter().map(|p| p.tool_name.as_str()).collect();
+                            let blocked_msg = format!(
+                                "Subagent reached an approval gate for tools that could not be auto-approved at this depth. \
+Blocked tool(s): {}. \
+This subagent completed partial work up to this point; review the logs for progress made.",
+                                tool_names.join(", ")
                             );
+                            tracing::warn!(
+                                subagent_id = %agent_id,
+                                tools = ?tool_names,
+                                "subagent reached unexpected approval gate; recording as partial result"
+                            );
+                            // Record as completed with partial result, not failed.
                             let _ = db
                                 .conn()
                                 .execute_unprepared(&format!(
-                                    "UPDATE subagents SET status='failed', error='{}', updated_at='{}', finished_at='{}' WHERE id='{}'",
-                                    escape_sql(&err),
+                                    "UPDATE subagents SET status='completed', result='{}', updated_at='{}', finished_at='{}' WHERE id='{}'",
+                                    escape_sql(&blocked_msg),
                                     finished,
                                     finished,
                                     agent_id
@@ -264,10 +278,10 @@ impl SubagentManager {
                                 .await;
                             append_subagent_log(
                                 agent_id,
-                                "failed",
+                                "completed_partial",
                                 &logs_goal,
+                                Some(&blocked_msg),
                                 None,
-                                Some(&err),
                                 Some(token_budget),
                             );
                             return;

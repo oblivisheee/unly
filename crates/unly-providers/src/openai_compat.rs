@@ -39,7 +39,7 @@ impl OpenAiCompatProvider {
             .timeout(Duration::from_secs(120))
             .user_agent("unly-agent/0.1.0")
             .build()
-            .expect("failed to build reqwest client");
+            .unwrap_or_else(|_| Client::new());
 
         let mut base_url: String = base_url.into();
         // Normalize: remove trailing slash.

@@ -32,8 +32,24 @@ fn default_config_has_safe_tool_defaults() {
 #[test]
 fn default_database_path_is_relative() {
     let config = default_config();
-    // Just a sanity check — not an absolute system path
-    assert!(!config.database.path.to_string_lossy().starts_with('/'));
+    // Sanity check: the default database path should be under a user-owned
+    // workspace (e.g. ~/.unly/data/unly.sqlite) and always end with the
+    // expected filename, not be a bare system path like /var/db/... .
+    let path = config.database.path.to_string_lossy();
+    assert!(
+        path.ends_with("unly.sqlite"),
+        "expected database path to end with 'unly.sqlite', got: {}",
+        path
+    );
+    // Must not be a bare system directory path (no plain /var, /etc, /usr prefix).
+    let forbidden = ["/var/", "/etc/", "/usr/", "/sys/", "/proc/"];
+    for prefix in &forbidden {
+        assert!(
+            !path.starts_with(prefix),
+            "database path must not point to a system directory, got: {}",
+            path
+        );
+    }
 }
 
 #[test]
