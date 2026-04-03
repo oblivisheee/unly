@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cron::Schedule;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
@@ -17,13 +17,22 @@ use unly_db::{
 use crate::job::JobDefinition;
 
 /// Callback type for job execution.
-pub type JobCallback =
-    Arc<dyn Fn(serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<String, String>> + Send>> + Send + Sync>;
+pub type JobCallback = Arc<
+    dyn Fn(
+            serde_json::Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::result::Result<String, String>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// The scheduler manages cron jobs and dispatches them at the right time.
 pub struct Scheduler {
     db: Database,
     jobs: Arc<RwLock<HashMap<String, (JobDefinition, JobCallback)>>>,
+    /// Tracks the last time each job was dispatched to prevent duplicate firing
+    /// within the same scheduling window.
+    last_dispatched: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
     max_concurrent: usize,
 }
 
@@ -32,6 +41,7 @@ impl Scheduler {
         Self {
             db,
             jobs: Arc::new(RwLock::new(HashMap::new())),
+            last_dispatched: Arc::new(RwLock::new(HashMap::new())),
             max_concurrent,
         }
     }
@@ -39,7 +49,10 @@ impl Scheduler {
     /// Register a job definition with a callback.
     pub async fn register(&self, job: JobDefinition, callback: JobCallback) {
         info!("registering job: {} ({})", job.name, job.id);
-        self.jobs.write().await.insert(job.id.clone(), (job.clone(), callback));
+        self.jobs
+            .write()
+            .await
+            .insert(job.id.clone(), (job.clone(), callback));
 
         // Persist to database.
         let now = Utc::now();
@@ -71,6 +84,9 @@ impl Scheduler {
     pub async fn run(self: Arc<Self>) {
         info!("scheduler started");
         let mut interval = tokio::time::interval(Duration::from_secs(60));
+        // Consume the first immediate tick so we do not attempt to catch up and
+        // re-fire jobs that were scheduled before this process started.
+        interval.tick().await;
         loop {
             interval.tick().await;
             let now = Utc::now();
@@ -88,8 +104,37 @@ impl Scheduler {
                 if let Some(cron_expr) = &job_def.cron_expression {
                     let should_run = match Schedule::from_str(cron_expr) {
                         Ok(schedule) => {
-                            let upcoming = schedule.upcoming(Utc).next();
-                            upcoming.map(|next| (next - now).num_seconds().abs() < 60).unwrap_or(false)
+                            // Find the most recent scheduled time that has already
+                            // passed (within the last 61 seconds).  A 61-second
+                            // look-back window accommodates the 60-second polling
+                            // interval with a 1-second safety margin.
+                            let window_start = now - chrono::Duration::seconds(61);
+                            let most_recent_past = schedule
+                                .after(&window_start)
+                                .take_while(|t| *t <= now)
+                                .last();
+
+                            match most_recent_past {
+                                None => false,
+                                Some(scheduled_at) => {
+                                    // Only fire if this job has not already been
+                                    // dispatched at or after the scheduled time.
+                                    let dispatched = self.last_dispatched.try_read();
+                                    match dispatched {
+                                        Ok(map) => map
+                                            .get(id.as_str())
+                                            .map(|last| *last < scheduled_at)
+                                            .unwrap_or(true),
+                                Err(_) => {
+                                            warn!(
+                                                job_id = %id,
+                                                "could not read last_dispatched map (lock contention); skipping job this tick"
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             warn!("invalid cron expression for job {}: {}", id, e);
@@ -98,6 +143,13 @@ impl Scheduler {
                     };
 
                     if should_run {
+                        // Record dispatch time before spawning so a concurrent tick
+                        // that arrives before the job finishes does not fire again.
+                        {
+                            let mut map = self.last_dispatched.write().await;
+                            map.insert(id.clone(), now);
+                        }
+
                         let permit = semaphore.clone().acquire_owned().await;
                         let callback = callback.clone();
                         let payload = job_def.payload.clone();
@@ -118,7 +170,7 @@ impl Scheduler {
                                 Err(err) => ("failed".to_string(), None, Some(err.clone())),
                             };
 
-                            if let Err(e) = result {
+                            if let Err(ref e) = result {
                                 error!("job {} failed: {}", job_id, e);
                             }
 

@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use crate::ids::{ChatId, MessageId, UserId};
 use crate::types::{Role, Timestamp};
+use serde::{Deserialize, Serialize};
 
 /// A single message in a conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,12 +18,31 @@ pub struct Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum MessageContent {
-    Text { text: String },
-    ImageUrl { url: String, detail: Option<String> },
-    Document { file_id: String, file_name: Option<String>, caption: Option<String> },
-    ToolCall { tool_call_id: String, function_name: String, arguments: serde_json::Value },
-    ToolResult { tool_call_id: String, content: String, is_error: bool },
-    Mixed { parts: Vec<ContentPart> },
+    Text {
+        text: String,
+    },
+    ImageUrl {
+        url: String,
+        detail: Option<String>,
+    },
+    Document {
+        file_id: String,
+        file_name: Option<String>,
+        caption: Option<String>,
+    },
+    ToolCall {
+        tool_call_id: String,
+        function_name: String,
+        arguments: serde_json::Value,
+    },
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+        is_error: bool,
+    },
+    Mixed {
+        parts: Vec<ContentPart>,
+    },
 }
 
 /// A single content part inside a mixed message.
@@ -54,7 +73,9 @@ impl MessageContent {
             MessageContent::ToolCall { function_name, .. } => {
                 format!("[tool call: {}]", function_name)
             }
-            MessageContent::ToolResult { content, is_error, .. } => {
+            MessageContent::ToolResult {
+                content, is_error, ..
+            } => {
                 if *is_error {
                     format!("[tool error: {}]", content)
                 } else {

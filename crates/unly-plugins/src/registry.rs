@@ -5,9 +5,7 @@ use tracing::{info, warn};
 
 use unly_core::Result;
 
-use crate::{
-    plugin::{Plugin, PluginEvent},
-};
+use crate::plugin::{Plugin, PluginEvent};
 
 const PLATFORM_VERSION: &str = "0.1.0";
 
@@ -51,7 +49,10 @@ impl PluginRegistry {
             });
         }
 
-        info!("registering plugin: {} v{}", manifest.name, manifest.version);
+        info!(
+            "registering plugin: {} v{}",
+            manifest.name, manifest.version
+        );
         self.plugins.write().await.insert(id, plugin);
         Ok(())
     }

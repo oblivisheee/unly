@@ -1,7 +1,7 @@
 //! Telegram bot interface for the unly agent platform.
 //!
 //! Implements:
-//! - Slash command handlers (/start, /help, /model, /provider, /status, /approve, /deny)
+//! - Slash command handlers (/start, /help, /model, /provider, /status, /subagents, /approve, /deny)
 //! - Inline keyboard support
 //! - Per-chat session isolation
 //! - User permission enforcement

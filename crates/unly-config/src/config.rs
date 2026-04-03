@@ -207,32 +207,72 @@ impl Default for ToolsConfig {
                 "http_post".to_string(),
                 "fs_read".to_string(),
                 "fs_list".to_string(),
+                "fs_write".to_string(),
                 "git_status".to_string(),
                 "git_log".to_string(),
+                "bash".to_string(),
+                "spawn_subagent".to_string(),
+                "cron_job".to_string(),
             ],
             disabled_tools: Vec::new(),
             require_approval_for_privileged: true,
             require_approval_for_dangerous: true,
             max_execution_seconds: 30,
             max_concurrent_executions: 4,
-            shell_allowlist: Vec::new(),
+            shell_allowlist: vec![
+                r"^ls(\s|$)".to_string(),
+                r"^pwd(\s|$)".to_string(),
+                r"^cat\s+".to_string(),
+                r"^echo\s+".to_string(),
+            ],
             shell_working_dir: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentConfig {
     /// Maximum depth for nested subagent spawning.
     pub max_subagent_depth: u32,
     /// Maximum number of concurrent subagents.
     pub max_concurrent_subagents: usize,
+    /// Maximum number of child subagents a single subagent can create.
+    pub max_child_subagents_per_parent: usize,
     /// Maximum tokens per subagent run.
     pub subagent_token_budget: u32,
     /// Maximum tool calls per agent turn.
     pub max_tool_calls_per_turn: u32,
     /// Maximum turns per conversation before truncation.
     pub max_turns: u32,
+    /// Enable semantic memory retrieval before each model turn.
+    pub inject_memory_context: bool,
+    /// Number of memory entries to inject into prompt context.
+    pub memory_context_top_k: usize,
+    /// Similarity threshold used for memory retrieval.
+    pub memory_context_similarity_threshold: f32,
+    /// Maximum characters per recalled memory snippet.
+    pub memory_context_max_chars_per_item: usize,
+    /// Maximum total characters for injected memory block.
+    pub memory_context_max_total_chars: usize,
+    /// Enable writing conversation turns into memory.
+    pub memory_store_conversation_turns: bool,
+    /// Maximum stored chars per memory turn record.
+    pub memory_store_max_chars_per_turn: usize,
+    /// Use file memory (`MEMORY.md` + linked files) as primary context.
+    pub use_file_memory_primary: bool,
+    /// Canonical memory index path.
+    pub file_memory_index_path: PathBuf,
+    /// Rolling AI-managed memory shard path.
+    pub file_memory_today_path: PathBuf,
+    /// Maximum chars per loaded memory file.
+    pub file_memory_max_chars_per_file: usize,
+    /// Maximum total chars for all loaded file memory.
+    pub file_memory_max_total_chars: usize,
+    /// Whether DB semantic memory augments file memory.
+    pub enable_db_memory_augmentation: bool,
+    /// Whether completed turns are appended to rolling memory shard file.
+    pub append_turns_to_today_memory: bool,
 }
 
 impl Default for AgentConfig {
@@ -240,9 +280,24 @@ impl Default for AgentConfig {
         Self {
             max_subagent_depth: 3,
             max_concurrent_subagents: 4,
+            max_child_subagents_per_parent: 5,
             subagent_token_budget: 8192,
             max_tool_calls_per_turn: 10,
             max_turns: 100,
+            inject_memory_context: true,
+            memory_context_top_k: 6,
+            memory_context_similarity_threshold: 0.68,
+            memory_context_max_chars_per_item: 240,
+            memory_context_max_total_chars: 2000,
+            memory_store_conversation_turns: true,
+            memory_store_max_chars_per_turn: 1200,
+            use_file_memory_primary: true,
+            file_memory_index_path: workspace::memory_index_path(),
+            file_memory_today_path: workspace::memory_today_path(),
+            file_memory_max_chars_per_file: 1200,
+            file_memory_max_total_chars: 3200,
+            enable_db_memory_augmentation: true,
+            append_turns_to_today_memory: true,
         }
     }
 }

@@ -39,7 +39,7 @@ impl OpenAiCompatProvider {
             .timeout(Duration::from_secs(120))
             .user_agent("unly-agent/0.1.0")
             .build()
-            .expect("failed to build reqwest client");
+            .unwrap_or_else(|_| Client::new());
 
         let mut base_url: String = base_url.into();
         // Normalize: remove trailing slash.
@@ -123,6 +123,7 @@ impl Provider for OpenAiCompatProvider {
             tool_calling: true,
             streaming: true,
             vision: false,
+            reasoning: false,
         }
     }
 
@@ -229,7 +230,13 @@ impl Provider for OpenAiCompatProvider {
         let byte_stream = response.bytes_stream();
 
         let stream = futures::stream::unfold(
-            (byte_stream, String::new(), String::new(), provider_name.clone(), model_name.clone()),
+            (
+                byte_stream,
+                String::new(),
+                String::new(),
+                provider_name.clone(),
+                model_name.clone(),
+            ),
             |(mut byte_stream, mut buf, mut accumulated, pname, mname)| async move {
                 loop {
                     // Try to find a complete SSE line in the buffer first.
@@ -359,4 +366,3 @@ impl Provider for OpenAiCompatProvider {
         }
     }
 }
-

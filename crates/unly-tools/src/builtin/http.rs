@@ -20,7 +20,7 @@ impl HttpGetTool {
                 .timeout(Duration::from_secs(30))
                 .user_agent("unly-agent/0.1.0")
                 .build()
-                .expect("http client"),
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 }
@@ -84,7 +84,11 @@ impl Tool for HttpGetTool {
                 let body = response.text().await.unwrap_or_default();
                 let duration_ms = start.elapsed().as_millis() as u64;
                 if status.is_success() {
-                    Ok(ToolResult::success(ctx.tool_call_id.clone(), body, duration_ms))
+                    Ok(ToolResult::success(
+                        ctx.tool_call_id.clone(),
+                        body,
+                        duration_ms,
+                    ))
                 } else {
                     Ok(ToolResult::error(
                         ctx.tool_call_id.clone(),
@@ -114,7 +118,7 @@ impl HttpPostTool {
                 .timeout(Duration::from_secs(30))
                 .user_agent("unly-agent/0.1.0")
                 .build()
-                .expect("http client"),
+                .unwrap_or_else(|_| Client::new()),
         }
     }
 }
@@ -180,7 +184,11 @@ impl Tool for HttpPostTool {
                 let resp_body = response.text().await.unwrap_or_default();
                 let duration_ms = start.elapsed().as_millis() as u64;
                 if status.is_success() {
-                    Ok(ToolResult::success(ctx.tool_call_id.clone(), resp_body, duration_ms))
+                    Ok(ToolResult::success(
+                        ctx.tool_call_id.clone(),
+                        resp_body,
+                        duration_ms,
+                    ))
                 } else {
                     Ok(ToolResult::error(
                         ctx.tool_call_id.clone(),

@@ -14,6 +14,7 @@ path = "src/main.rs"
 unly-core.workspace = true
 unly-config.workspace = true
 unly-db.workspace = true
+unly-memory.workspace = true
 unly-providers.workspace = true
 unly-tools.workspace = true
 unly-audit.workspace = true

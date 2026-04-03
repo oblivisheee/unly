@@ -1,7 +1,5 @@
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
-};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
 
 use crate::{entity::memory_entry, error::DbResult};
@@ -65,9 +63,7 @@ impl<'a> MemoryRepo<'a> {
             created_at: Set(row.created_at.to_rfc3339()),
             expires_at: Set(row.expires_at.map(|t| t.to_rfc3339())),
         };
-        memory_entry::Entity::insert(active)
-            .exec(self.conn)
-            .await?;
+        memory_entry::Entity::insert(active).exec(self.conn).await?;
         Ok(())
     }
 

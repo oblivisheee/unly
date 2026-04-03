@@ -7,5 +7,5 @@ pub mod user;
 pub use audit::{AuditRepo, AuditRow};
 pub use chat::{ChatRepo, ChatRow, MessageRow};
 pub use job::{JobRepo, JobRow, JobRunRow};
-pub use memory::{MemoryRepo, MemoryEntryRow};
+pub use memory::{MemoryEntryRow, MemoryRepo};
 pub use user::{UserRepo, UserRow};

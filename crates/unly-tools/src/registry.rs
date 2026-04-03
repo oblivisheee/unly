@@ -99,21 +99,25 @@ impl ToolRegistry {
         }
 
         let max_secs = self.policy.max_execution_seconds;
-        let _permit = self.semaphore.acquire().await.map_err(|e| {
-            Error::Tool {
-                tool: name.to_string(),
-                message: format!("semaphore error: {}", e),
-            }
+        let _permit = self.semaphore.acquire().await.map_err(|e| Error::Tool {
+            tool: name.to_string(),
+            message: format!("semaphore error: {}", e),
         })?;
+
+        let mut exec_args = args;
+        if approved {
+            if let serde_json::Value::Object(obj) = &mut exec_args {
+                obj.insert("__approved".to_string(), serde_json::Value::Bool(true));
+            }
+        }
 
         debug!(tool = %name, "executing tool");
         let start = Instant::now();
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(max_secs),
-            tool.execute(args, &ctx),
-        )
-        .await;
+        let result = if name == "bash" {
+            Ok(tool.execute(exec_args, &ctx).await)
+        } else {
+            tokio::time::timeout(Duration::from_secs(max_secs), tool.execute(exec_args, &ctx)).await
+        };
 
         match result {
             Ok(Ok(mut tool_result)) => {

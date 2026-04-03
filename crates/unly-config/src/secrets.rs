@@ -42,7 +42,10 @@ pub fn warn_if_placeholder(name: &str, value: &str) {
     ];
     for p in &placeholders {
         if value.contains(p) {
-            warn!("{} appears to contain a placeholder value — update before production use", name);
+            warn!(
+                "{} appears to contain a placeholder value — update before production use",
+                name
+            );
             return;
         }
     }

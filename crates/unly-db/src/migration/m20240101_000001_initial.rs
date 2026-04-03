@@ -193,7 +193,11 @@ impl MigrationTrait for Migration {
                     .table(Users::Table)
                     .if_not_exists()
                     .col(ColumnDef::new(Users::Id).string().not_null().primary_key())
-                    .col(ColumnDef::new(Users::TelegramUserId).big_integer().unique_key())
+                    .col(
+                        ColumnDef::new(Users::TelegramUserId)
+                            .big_integer()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(Users::Username).string())
                     .col(ColumnDef::new(Users::DisplayName).string())
                     .col(
@@ -337,16 +341,8 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .primary_key(),
                     )
-                    .col(
-                        ColumnDef::new(MemoryEntries::ScopeType)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(MemoryEntries::ScopeId)
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(MemoryEntries::ScopeType).string().not_null())
+                    .col(ColumnDef::new(MemoryEntries::ScopeId).string().not_null())
                     .col(ColumnDef::new(MemoryEntries::Content).text().not_null())
                     .col(ColumnDef::new(MemoryEntries::Embedding).blob().not_null())
                     .col(ColumnDef::new(MemoryEntries::SourceType).string())
@@ -357,11 +353,7 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("{}"),
                     )
-                    .col(
-                        ColumnDef::new(MemoryEntries::CreatedAt)
-                            .string()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(MemoryEntries::CreatedAt).string().not_null())
                     .col(ColumnDef::new(MemoryEntries::ExpiresAt).string())
                     .to_owned(),
             )

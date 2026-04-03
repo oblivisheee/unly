@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,12 +9,12 @@ use tracing::info;
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config, workspace};
 use unly_db::Database;
-use unly_providers::copilot::CopilotProvider;
+use unly_providers::copilot::{CopilotProvider, DevicePollResult};
 use unly_telegram::{SessionStore, TelegramBot};
 
 use crate::{
     logging::init_logging,
-    service::{build_providers, build_runtime, build_tools},
+    service::{build_providers, build_runtime, build_tools, build_tools_with_scheduler},
 };
 
 /// Unly - self-hosted personal AI agent platform.
@@ -22,12 +22,7 @@ use crate::{
 #[command(name = "unly", version, about = "Unly personal AI agent platform")]
 pub struct Cli {
     /// Path to the configuration file.
-    #[arg(
-        short,
-        long,
-        env = "UNLY_CONFIG",
-        global = true
-    )]
+    #[arg(short, long, env = "UNLY_CONFIG", global = true)]
     pub config: Option<PathBuf>,
 
     #[command(subcommand)]
@@ -93,6 +88,13 @@ pub enum Commands {
         /// Output file path (defaults to workspace config path).
         output: Option<PathBuf>,
     },
+
+    /// Remove the entire Unly workspace (config, database, identity, cache).
+    Uninstall {
+        /// Skip all confirmation prompts.
+        #[arg(long)]
+        skip: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -142,7 +144,10 @@ impl Cli {
                     .with_context(|| format!("loading config from {}", config_path.display()))?;
 
                 init_logging(&config.logging.level, config.logging.json);
-                info!("starting unly agent platform v{}", env!("CARGO_PKG_VERSION"));
+                info!(
+                    "starting unly agent platform v{}",
+                    env!("CARGO_PKG_VERSION")
+                );
 
                 // Connect to database using the full DatabaseConfig.
                 let db = Database::connect_with_config(&config.database)
@@ -154,9 +159,20 @@ impl Cli {
                 // Build subsystems.
                 let audit = Arc::new(AuditLogger::new(db.clone()));
                 let providers = build_providers(&config).await?;
-                let tools = build_tools(&config);
-                let runtime = build_runtime(&config, providers.clone(), tools, Some(audit.clone()));
+                let (tools, scheduler) = build_tools_with_scheduler(&config, db.clone());
+                let runtime = build_runtime(
+                    &config,
+                    providers.clone(),
+                    tools,
+                    db.clone(),
+                    Some(audit.clone()),
+                );
                 let sessions = SessionStore::new();
+                if config.scheduler.enabled {
+                    tokio::spawn(async move {
+                        scheduler.run().await;
+                    });
+                }
 
                 let config_arc = Arc::new(config);
                 let bot = Arc::new(TelegramBot::new(
@@ -164,7 +180,7 @@ impl Cli {
                     sessions,
                     runtime,
                     providers,
-                    db,
+                    db.clone(),
                     audit.clone(),
                 ));
 
@@ -172,27 +188,25 @@ impl Cli {
                 audit.success("startup", "system", "start");
 
                 bot.start().await;
+                audit.success("shutdown", "system", "ctrlc");
+                info!("shutdown signal received - stopping unly gracefully");
+                audit.flush().await;
+                info!("audit logger flushed");
+                db.close().await;
+                info!("database connection closed");
 
                 Ok(())
             }
 
-            Commands::Setup => {
-                run_setup_wizard(&config_path).await
-            }
+            Commands::Setup => run_setup_wizard(&config_path).await,
 
             Commands::Validate => {
                 match load_config(&config_path) {
                     Ok(config) => {
                         println!("Configuration is valid");
                         println!("  Telegram bot token: configured");
-                        println!(
-                            "  Admin user IDs: {:?}",
-                            config.telegram.admin_user_ids
-                        );
-                        println!(
-                            "  Default provider: {}",
-                            config.providers.default_provider
-                        );
+                        println!("  Admin user IDs: {:?}", config.telegram.admin_user_ids);
+                        println!("  Default provider: {}", config.providers.default_provider);
                         println!("  Default model: {}", config.providers.default_model);
                         println!("  Database type: {:?}", config.database.db_type);
                         println!("  Database path: {}", config.database.path.display());
@@ -220,12 +234,10 @@ impl Cli {
 
                 // Database check.
                 match Database::connect_with_config(&config.database).await {
-                    Ok(db) => {
-                        match db.health_check().await {
-                            Ok(_) => println!("[OK]   Database: ok"),
-                            Err(e) => println!("[FAIL] Database: {}", e),
-                        }
-                    }
+                    Ok(db) => match db.health_check().await {
+                        Ok(_) => println!("[OK]   Database: ok"),
+                        Err(e) => println!("[FAIL] Database: {}", e),
+                    },
                     Err(e) => println!("[FAIL] Database: {}", e),
                 }
 
@@ -372,7 +384,10 @@ impl Cli {
                     Ok(())
                 }
                 PluginCommands::Disable { id } => {
-                    println!("Plugin disable: {} (update config.toml plugins.disabled)", id);
+                    println!(
+                        "Plugin disable: {} (update config.toml plugins.disabled)",
+                        id
+                    );
                     Ok(())
                 }
             },
@@ -510,6 +525,8 @@ impl Cli {
                 println!("\nThen run: unly provider-login copilot");
                 Ok(())
             }
+
+            Commands::Uninstall { skip } => run_uninstall_wizard(skip).await,
         }
     }
 }
@@ -535,6 +552,12 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             println!("Setup cancelled. Existing config unchanged.");
             return Ok(());
         }
+        if let Err(e) = purge_subagents_from_existing_config(config_path).await {
+            println!(
+                "Warning: failed to clear subagents before config rewrite: {}",
+                e
+            );
+        }
     }
 
     // Ensure the workspace directory exists.
@@ -544,9 +567,9 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     println!("\n[1/4] Telegram Bot");
     println!("Create a bot at https://t.me/BotFather and paste the token below.");
 
-    let bot_token: String = Password::with_theme(&theme)
+    let bot_token: String = Input::with_theme(&theme)
         .with_prompt("Telegram bot token")
-        .interact()?;
+        .interact_text()?;
 
     let admin_id_str: String = Input::with_theme(&theme)
         .with_prompt("Your Telegram user ID (get it from @userinfobot)")
@@ -591,6 +614,11 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         None
     };
 
+    let full_access = Confirm::with_theme(&theme)
+        .with_prompt("Give the agent full tool access (no approval prompts)?")
+        .default(false)
+        .interact()?;
+
     // ── Build config ─────────────────────────────────────────────────────────
     println!("\n[4/4] Writing configuration...");
 
@@ -610,22 +638,25 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
                 .with_prompt("API base URL")
                 .default("https://api.openai.com/v1".to_string())
                 .interact_text()?;
-            let api_key: String = Password::with_theme(&theme)
+            let api_key: String = Input::with_theme(&theme)
                 .with_prompt("API key")
-                .interact()?;
+                .interact_text()?;
             let model: String = Input::with_theme(&theme)
                 .with_prompt("Default model ID")
                 .default("gpt-4o".to_string())
                 .interact_text()?;
 
             config.providers.copilot.enabled = false;
-            config.providers.openai_compatible.push(unly_config::OpenAiCompatConfig {
-                name: "openai".to_string(),
-                enabled: true,
-                base_url,
-                api_key,
-                models: vec![model.clone()],
-            });
+            config
+                .providers
+                .openai_compatible
+                .push(unly_config::OpenAiCompatConfig {
+                    name: "openai".to_string(),
+                    enabled: true,
+                    base_url,
+                    api_key,
+                    models: vec![model.clone()],
+                });
             config.providers.default_provider = "openai".to_string();
             config.providers.default_model = model;
         }
@@ -637,13 +668,16 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
                 .interact_text()?;
 
             config.providers.copilot.enabled = false;
-            config.providers.openai_compatible.push(unly_config::OpenAiCompatConfig {
-                name: "local".to_string(),
-                enabled: true,
-                base_url: "http://localhost:11434/v1".to_string(),
-                api_key: "ollama".to_string(),
-                models: vec![model.clone()],
-            });
+            config
+                .providers
+                .openai_compatible
+                .push(unly_config::OpenAiCompatConfig {
+                    name: "local".to_string(),
+                    enabled: true,
+                    base_url: "http://localhost:11434/v1".to_string(),
+                    api_key: "ollama".to_string(),
+                    models: vec![model.clone()],
+                });
             config.providers.default_provider = "local".to_string();
             config.providers.default_model = model;
         }
@@ -653,6 +687,12 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     if db_idx == 1 {
         config.database.db_type = unly_config::DbType::Postgres;
         config.database.postgres_url = postgres_url;
+    }
+
+    if full_access {
+        config.tools.require_approval_for_privileged = false;
+        config.tools.require_approval_for_dangerous = false;
+        config.tools.shell_allowlist = vec![r"(?s)^.*$".to_string()];
     }
 
     // Write config file.
@@ -669,21 +709,162 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         let _ = std::fs::write(&id_path, workspace::DEFAULT_IDENTITY);
         println!("Identity file created: {}", id_path.display());
     }
+    let soul_path = workspace::soul_path();
+    if !soul_path.exists() {
+        let _ = std::fs::write(&soul_path, workspace::DEFAULT_SOUL);
+        println!("Soul file created: {}", soul_path.display());
+    }
+    let tools_path = workspace::tools_path();
+    if !tools_path.exists() {
+        let _ = std::fs::write(&tools_path, workspace::DEFAULT_TOOLS);
+        println!("Tools file created: {}", tools_path.display());
+    }
+    let memory_path = workspace::memory_index_path();
+    if !memory_path.exists() {
+        let _ = std::fs::write(&memory_path, workspace::DEFAULT_MEMORY);
+        println!("Memory index created: {}", memory_path.display());
+    }
+    let memory_today = workspace::memory_today_path();
+    if !memory_today.exists() {
+        if let Some(parent) = memory_today.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&memory_today, workspace::DEFAULT_MEMORY_TODAY);
+        println!("Today memory file created: {}", memory_today.display());
+    }
     let boot_path = workspace::boot_path();
     if !boot_path.exists() {
         let _ = std::fs::write(&boot_path, workspace::DEFAULT_BOOT);
         println!("Boot file created: {}", boot_path.display());
     }
 
+    if provider_idx == 0 {
+        let cp = CopilotProvider::new(
+            config.providers.copilot.github_client_id.clone(),
+            config.providers.copilot.token_cache_path.clone(),
+            config.providers.copilot.copilot_api_url.clone(),
+        );
+        println!("\nStarting GitHub Copilot authentication...");
+        let state = cp
+            .start_device_flow()
+            .await
+            .map_err(|e| anyhow::anyhow!("device flow start failed: {}", e))?;
+        println!("Open this URL: {}", state.verification_uri);
+        println!("Enter code: {}", state.user_code);
+        println!("Waiting for authorization...");
+        let poll_interval = Duration::from_secs(state.interval.max(5));
+        let timeout = Duration::from_secs(state.expires_in);
+        let start = std::time::Instant::now();
+        loop {
+            if start.elapsed() > timeout {
+                bail!("device flow timed out");
+            }
+            tokio::time::sleep(poll_interval).await;
+            match cp.poll_device_flow(&state).await {
+                Ok(DevicePollResult::Authorized) => {
+                    println!("Authenticated with GitHub Copilot.");
+                    println!(
+                        "Token cached at: {}",
+                        config.providers.copilot.token_cache_path.display()
+                    );
+                    break;
+                }
+                Ok(DevicePollResult::Pending) => {
+                    print!(".");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+                }
+                Ok(DevicePollResult::SlowDown) => {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Ok(DevicePollResult::Denied) => bail!("authorization was denied"),
+                Ok(DevicePollResult::Expired) => bail!("device code expired - please try again"),
+                Ok(DevicePollResult::Error(e)) => bail!("authorization error: {}", e),
+                Err(e) => bail!("polling error: {}", e),
+            }
+        }
+    }
+
     println!("\nConfiguration written to: {}", config_path.display());
     println!("\nNext steps:");
-    if provider_idx == 0 {
-        println!("  1. Run: unly provider-login copilot");
-        println!("  2. Run: unly start");
-    } else {
-        println!("  1. Run: unly start");
-    }
+    println!("  1. Run: unly start");
 
     Ok(())
 }
 
+async fn run_uninstall_wizard(skip: bool) -> Result<()> {
+    let theme = ColorfulTheme::default();
+    let workspace_dir = workspace::workspace_dir();
+    let config_path = workspace::default_config_path();
+
+    println!("\nUnly Uninstall");
+    println!("{}", "=".repeat(50));
+    println!(
+        "This will permanently delete the full Unly workspace:\n  {}",
+        workspace_dir.display()
+    );
+
+    if !workspace_dir.exists() {
+        println!("Workspace does not exist. Nothing to remove.");
+        return Ok(());
+    }
+
+    if let Err(e) = purge_subagents_from_existing_config(&config_path).await {
+        println!(
+            "Warning: failed to clear subagents before workspace removal: {}",
+            e
+        );
+    }
+
+    if !skip {
+        let confirm_first = Confirm::with_theme(&theme)
+            .with_prompt("Are you sure you want to delete all Unly data?")
+            .default(false)
+            .interact()?;
+        if !confirm_first {
+            println!("Uninstall cancelled.");
+            return Ok(());
+        }
+
+        println!("Waiting 10 seconds before final confirmation...");
+        std::thread::sleep(Duration::from_secs(10));
+
+        let confirm_second = Confirm::with_theme(&theme)
+            .with_prompt("This action is irreversible. Confirm deletion again?")
+            .default(false)
+            .interact()?;
+        if !confirm_second {
+            println!("Uninstall cancelled.");
+            return Ok(());
+        }
+    }
+
+    std::fs::remove_dir_all(&workspace_dir)
+        .with_context(|| format!("removing workspace {}", workspace_dir.display()))?;
+
+    println!("Unly workspace removed: {}", workspace_dir.display());
+    Ok(())
+}
+
+async fn purge_subagents_from_existing_config(config_path: &PathBuf) -> Result<()> {
+    if let Err(e) = workspace::clear_subagent_logs() {
+        println!("Warning: failed to clear subagent logs: {}", e);
+    }
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let config = load_config(config_path)
+        .with_context(|| format!("loading config from {}", config_path.display()))?;
+    let db = Database::connect_with_config(&config.database)
+        .await
+        .context("connecting to database for subagent cleanup")?;
+    let deleted = db
+        .delete_all_subagents()
+        .await
+        .context("deleting subagents from database")?;
+    if deleted > 0 {
+        println!("Deleted {} subagent records.", deleted);
+    }
+    db.close().await;
+    Ok(())
+}
