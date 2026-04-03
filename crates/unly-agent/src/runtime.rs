@@ -13,7 +13,7 @@ use unly_core::{
 use unly_memory::{MemoryQuery, MemoryScope, MemoryStore};
 use unly_tools::ToolRegistry;
 
-use crate::context::{AgentContext, PendingApproval};
+use crate::context::{AgentContext, MediaKind, MediaSend, PendingApproval};
 
 /// Configuration for the agent runtime.
 pub struct AgentRuntimeConfig {
@@ -206,6 +206,11 @@ impl AgentRuntime {
                                         "execute",
                                     );
                                 }
+                            }
+
+                            // Collect any queued Telegram media sends.
+                            if !tool_result.is_error {
+                                collect_media_from_result(ctx, &tool_result.metadata);
                             }
 
                             let content = if tool_result.is_error {
@@ -453,6 +458,10 @@ impl AgentRuntime {
                                     );
                                 }
                             }
+                            // Collect any queued Telegram media sends.
+                            if !tool_result.is_error {
+                                collect_media_from_result(ctx, &tool_result.metadata);
+                            }
                             let content = if tool_result.is_error {
                                 format!("Error: {}", tool_result.stderr)
                             } else {
@@ -586,6 +595,17 @@ impl AgentRuntime {
                 tool_calls: None,
                 name: None,
             });
+
+            // Emit any queued media sends before the final text response.
+            for media in ctx.pending_media.drain(..) {
+                let _ = sender
+                    .send(StreamEvent::SendMedia {
+                        kind: media.kind,
+                        path: media.path,
+                        caption: media.caption,
+                    })
+                    .await;
+            }
 
             let _ = sender.send(StreamEvent::Done(final_text.clone())).await;
             self.store_memory_turn(ctx, &user_msg_for_memory, &final_text)
@@ -1029,9 +1049,40 @@ pub enum StreamEvent {
     Done(String),
     /// One or more tool calls need user approval.
     ApprovalRequired(Vec<crate::context::PendingApproval>),
+    /// A media file should be sent to the Telegram chat before the text response.
+    SendMedia {
+        kind: MediaKind,
+        path: String,
+        caption: Option<String>,
+    },
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// If a tool result carries a `__telegram_send` metadata key, parse it and
+/// push the media request onto `ctx.pending_media`.
+fn collect_media_from_result(ctx: &mut AgentContext, meta: &serde_json::Value) {
+    if let Some(send_info) = meta.get("__telegram_send") {
+        let kind_str = send_info
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("document");
+        let kind = if kind_str == "photo" {
+            MediaKind::Photo
+        } else {
+            MediaKind::Document
+        };
+        let path = match send_info.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => return, // malformed — ignore
+        };
+        let caption = send_info
+            .get("caption")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        ctx.pending_media.push(MediaSend { kind, path, caption });
+    }
+}
 
 /// Strip `<think>…</think>` blocks from the model output.
 ///

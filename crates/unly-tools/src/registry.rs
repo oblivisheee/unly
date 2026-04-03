@@ -90,6 +90,11 @@ impl ToolRegistry {
 
         // Policy check: approval required?
         if self.policy.needs_approval(&schema.risk) && !approved {
+            info!(
+                tool = %name,
+                risk = ?schema.risk,
+                "tool requires approval — awaiting user confirmation"
+            );
             return Err(Error::ToolDenied {
                 reason: format!(
                     "tool '{}' is {:?} and requires explicit approval",

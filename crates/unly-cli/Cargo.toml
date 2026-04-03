@@ -34,3 +34,4 @@ clap.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 dialoguer.workspace = true
+reqwest.workspace = true

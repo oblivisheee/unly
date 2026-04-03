@@ -9,12 +9,14 @@ use tracing::info;
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config, workspace};
 use unly_db::Database;
+use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::copilot::{CopilotProvider, DevicePollResult};
 use unly_telegram::{SessionStore, TelegramBot};
 
 use crate::{
-    logging::init_logging,
+    logging::{init_logging, init_logging_with_file},
     service::{build_providers, build_runtime, build_tools, build_tools_with_scheduler},
+    update as self_update,
 };
 
 /// Unly - self-hosted personal AI agent platform.
@@ -95,16 +97,39 @@ pub enum Commands {
         #[arg(long)]
         skip: bool,
     },
+
+    /// Check for a newer release and optionally install it.
+    Update {
+        /// Only print whether an update is available without installing it.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum PluginCommands {
-    /// List installed plugins.
+    /// List installed skills.
     List,
-    /// Enable a plugin.
-    Enable { id: String },
-    /// Disable a plugin.
-    Disable { id: String },
+    /// Install a skill from a local directory.
+    Install {
+        /// Path to the skill directory (must contain a SKILL.md file).
+        path: PathBuf,
+    },
+    /// Remove an installed skill by its directory name.
+    Remove {
+        /// Skill directory name (as shown by `unly plugin list`).
+        id: String,
+    },
+    /// Enable a previously disabled skill.
+    Enable {
+        /// Skill directory name.
+        id: String,
+    },
+    /// Disable a skill (keeps it installed but inactive).
+    Disable {
+        /// Skill directory name.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -143,7 +168,11 @@ impl Cli {
                 let config = load_config(&config_path)
                     .with_context(|| format!("loading config from {}", config_path.display()))?;
 
-                init_logging(&config.logging.level, config.logging.json);
+                init_logging_with_file(
+                    &config.logging.level,
+                    config.logging.json,
+                    config.logging.file.as_deref(),
+                );
                 info!(
                     "starting unly agent platform v{}",
                     env!("CARGO_PKG_VERSION")
@@ -374,20 +403,78 @@ impl Cli {
 
             Commands::Plugin(cmd) => match cmd {
                 PluginCommands::List => {
-                    println!("Plugin management via CLI: use unly plugin list");
-                    println!("No plugins currently installed.");
-                    println!("\nTo install a plugin, see docs/plugins.md");
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    let plugins_dir = &config.plugins.plugins_dir;
+                    let skills = SkillLoader::load_from_dir(skills_dir);
+                    let plugins = PluginLoader::load_from_dir(plugins_dir);
+
+                    if skills.is_empty() && plugins.is_empty() {
+                        println!("No skills or plugins installed.");
+                        println!(
+                            "\nInstall a skill with:   unly plugin install <path-to-skill-dir>"
+                        );
+                    } else {
+                        print_ext_table(
+                            "Skills",
+                            skills_dir,
+                            skills.iter().map(|s| {
+                                (s.meta.name.clone(), s.enabled, s.meta.description.clone())
+                            }),
+                            "Skills: none installed.",
+                        );
+                        println!();
+                        print_ext_table(
+                            "Plugins",
+                            plugins_dir,
+                            plugins.iter().map(|p| {
+                                (p.meta.name.clone(), p.enabled, p.meta.description.clone())
+                            }),
+                            "Plugins: none installed.",
+                        );
+                    }
+                    Ok(())
+                }
+                PluginCommands::Install { path } => {
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    let src = std::fs::canonicalize(&path).with_context(|| {
+                        format!("path does not exist: {}", path.display())
+                    })?;
+                    match SkillLoader::install(&src, skills_dir) {
+                        Ok(name) => {
+                            println!("Skill '{}' installed successfully.", name);
+                            println!("Skills directory: {}", skills_dir.display());
+                        }
+                        Err(e) => bail!("{}", e),
+                    }
+                    Ok(())
+                }
+                PluginCommands::Remove { id } => {
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    match SkillLoader::remove(&id, skills_dir) {
+                        Ok(()) => println!("Skill '{}' removed.", id),
+                        Err(e) => bail!("{}", e),
+                    }
                     Ok(())
                 }
                 PluginCommands::Enable { id } => {
-                    println!("Plugin enable: {} (update config.toml plugins.enabled)", id);
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    match SkillLoader::enable(&id, skills_dir) {
+                        Ok(()) => println!("Skill '{}' enabled.", id),
+                        Err(e) => bail!("{}", e),
+                    }
                     Ok(())
                 }
                 PluginCommands::Disable { id } => {
-                    println!(
-                        "Plugin disable: {} (update config.toml plugins.disabled)",
-                        id
-                    );
+                    let config = load_config(&config_path).unwrap_or_else(|_| default_config());
+                    let skills_dir = &config.plugins.skills_dir;
+                    match SkillLoader::disable(&id, skills_dir) {
+                        Ok(()) => println!("Skill '{}' disabled.", id),
+                        Err(e) => bail!("{}", e),
+                    }
                     Ok(())
                 }
             },
@@ -527,6 +614,30 @@ impl Cli {
             }
 
             Commands::Uninstall { skip } => run_uninstall_wizard(skip).await,
+
+            Commands::Update { check } => {
+                if check {
+                    match self_update::check_update().await {
+                        Ok(Some((current, latest, url))) => {
+                            println!("Update available: v{} → v{}", current, latest);
+                            println!("Release: {}", url);
+                            println!("\nRun `unly update` to install.");
+                        }
+                        Ok(None) => {
+                            println!(
+                                "Already up-to-date (v{}).",
+                                env!("CARGO_PKG_VERSION")
+                            );
+                        }
+                        Err(e) => bail!("update check failed: {}", e),
+                    }
+                } else {
+                    self_update::perform_update()
+                        .await
+                        .context("self-update failed")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -867,4 +978,28 @@ async fn purge_subagents_from_existing_config(config_path: &PathBuf) -> Result<(
     }
     db.close().await;
     Ok(())
+}
+
+/// Print a table of skills or plugins to stdout.
+///
+/// `title` is shown as the section heading with the directory path.
+/// `rows` is an iterator of `(name, enabled, description)` tuples.
+fn print_ext_table(
+    title: &str,
+    dir: &std::path::Path,
+    rows: impl Iterator<Item = (String, bool, String)>,
+    none_msg: &str,
+) {
+    let rows: Vec<_> = rows.collect();
+    if rows.is_empty() {
+        println!("{}", none_msg);
+        return;
+    }
+    println!("{} ({})", title, dir.display());
+    println!("{:<30} {:<10} Description", "Name", "Status");
+    println!("{}", "-".repeat(80));
+    for (name, enabled, description) in &rows {
+        let status = if *enabled { "enabled" } else { "disabled" };
+        println!("{:<30} {:<10} {}", name, status, description);
+    }
 }

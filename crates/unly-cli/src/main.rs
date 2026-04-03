@@ -3,6 +3,7 @@
 mod commands;
 mod logging;
 mod service;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;

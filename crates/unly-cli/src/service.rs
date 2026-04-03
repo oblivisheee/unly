@@ -6,6 +6,7 @@ use unly_audit::AuditLogger;
 use unly_config::{workspace, AppConfig};
 use unly_db::Database;
 use unly_memory::MemoryStore;
+use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::{
     copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
 };
@@ -13,7 +14,9 @@ use unly_tools::{
     builtin::{
         create_scheduler, CronJobTool, FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool,
         FsMkdirTool, FsMoveTool, FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool,
-        HttpGetTool, HttpPostTool, SpawnSubagentTool,
+        HttpGetTool, HttpPostTool, PluginCreateTool, PluginDisableTool, PluginEnableTool,
+        PluginListTool, PluginRemoveTool, SkillCreateTool, SkillDisableTool, SkillEnableTool,
+        SkillListTool, SkillRemoveTool, SpawnSubagentTool,
     },
     policy::ExecutionPolicy,
     ToolRegistry,
@@ -35,6 +38,16 @@ fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
         "fs_grep",
         "spawn_subagent",
         "cron_job",
+        "skill_list",
+        "skill_create",
+        "skill_enable",
+        "skill_disable",
+        "skill_remove",
+        "plugin_list",
+        "plugin_create",
+        "plugin_enable",
+        "plugin_disable",
+        "plugin_remove",
     ] {
         if !enabled.iter().any(|t| t == name) {
             enabled.push(name.to_string());
@@ -79,6 +92,32 @@ pub async fn build_providers(config: &AppConfig) -> Result<Arc<ProviderRegistry>
     Ok(registry)
 }
 
+/// Header injected before skill instructions in the system prompt.
+const SKILLS_SECTION_HEADER: &str =
+    "# Skills\n\nThe following skills are available and their instructions should be \
+followed when relevant:\n\n";
+
+/// Header injected before plugin instructions in the system prompt.
+const PLUGINS_SECTION_HEADER: &str =
+    "# Plugins\n\nThe following plugins are installed and their instructions should be \
+followed when relevant:\n\n";
+
+/// Register the skill/plugin self-configuration tools into `registry`.
+fn register_management_tools(registry: &mut ToolRegistry, config: &AppConfig) {
+    let skills_dir = config.plugins.skills_dir.clone();
+    let plugins_dir = config.plugins.plugins_dir.clone();
+    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillRemoveTool { skills_dir });
+    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginRemoveTool { plugins_dir });
+}
+
 /// Build the tool registry from config.
 pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     let policy = ExecutionPolicy {
@@ -119,6 +158,7 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
         config.tools.require_approval_for_dangerous,
     ));
     registry.register(SpawnSubagentTool);
+    register_management_tools(&mut registry, config);
 
     Arc::new(registry)
 }
@@ -167,6 +207,7 @@ pub fn build_tools_with_scheduler(
     registry.register(SpawnSubagentTool);
     let scheduler = create_scheduler(db.clone(), &config.scheduler);
     registry.register(CronJobTool::new(db, scheduler.clone()));
+    register_management_tools(&mut registry, config);
 
     (Arc::new(registry), scheduler)
 }
@@ -176,7 +217,10 @@ pub fn build_tools_with_scheduler(
 /// If these files don't exist in the workspace, bundled defaults are used.
 /// This function also writes the default files if they are absent, so the user
 /// can discover and customise them.
-pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
+///
+/// Active skills found in the configured skills directory are appended as an
+/// additional `# Skills` section so the agent knows about them at runtime.
+pub fn load_system_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> String {
     let id_path = workspace::identity_path();
     let soul_path = workspace::soul_path();
     let boot_path = workspace::boot_path();
@@ -229,6 +273,46 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
         std::fs::read_to_string(&boot_path).unwrap_or_else(|_| workspace::DEFAULT_BOOT.to_string())
     } else {
         String::new()
+    };
+
+    // Load enabled skills and build a skills section for the prompt.
+    let skills_section = {
+        let skills = SkillLoader::load_from_dir(&config.plugins.skills_dir);
+        let active: Vec<_> = skills.into_iter().filter(|s| s.enabled).collect();
+        if active.is_empty() {
+            String::new()
+        } else {
+            let mut section = SKILLS_SECTION_HEADER.to_string();
+            for skill in &active {
+                section.push_str(&format!(
+                    "## {} — {}\n\n{}\n\n",
+                    skill.meta.name,
+                    skill.meta.description,
+                    skill.instructions.trim()
+                ));
+            }
+            section
+        }
+    };
+
+    // Load enabled plugins and build a plugins section for the prompt.
+    let plugins_section = {
+        let plugins = PluginLoader::load_from_dir(&config.plugins.plugins_dir);
+        let active: Vec<_> = plugins.into_iter().filter(|p| p.enabled).collect();
+        if active.is_empty() {
+            String::new()
+        } else {
+            let mut section = PLUGINS_SECTION_HEADER.to_string();
+            for plugin in &active {
+                section.push_str(&format!(
+                    "## {} — {}\n\n{}\n\n",
+                    plugin.meta.name,
+                    plugin.meta.description,
+                    plugin.instructions.trim()
+                ));
+            }
+            section
+        }
     };
 
     let policy = tool_registry.policy();
@@ -302,26 +386,25 @@ For cron tasks, prefer the native `cron_job` tool. For delegated execution, pref
         policy.max_concurrent
     );
 
+    // Assemble prompt sections; optional sections are only added when non-empty.
+    let mut sections: Vec<&str> = vec![
+        identity.trim(),
+        soul.trim(),
+        tools_profile.trim(),
+        memory_index.trim(),
+    ];
     if boot_mode {
-        format!(
-            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-            identity.trim(),
-            soul.trim(),
-            tools_profile.trim(),
-            memory_index.trim(),
-            boot.trim(),
-            capabilities.trim()
-        )
-    } else {
-        format!(
-            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-            identity.trim(),
-            soul.trim(),
-            tools_profile.trim(),
-            memory_index.trim(),
-            capabilities.trim()
-        )
+        sections.push(boot.trim());
     }
+    if !skills_section.is_empty() {
+        sections.push(skills_section.trim());
+    }
+    if !plugins_section.is_empty() {
+        sections.push(plugins_section.trim());
+    }
+    sections.push(capabilities.trim());
+
+    sections.join("\n\n---\n\n")
 }
 
 /// Build the agent runtime from config.
@@ -332,7 +415,7 @@ pub fn build_runtime(
     db: Database,
     audit: Option<Arc<AuditLogger>>,
 ) -> Arc<AgentRuntime> {
-    let system_prompt = load_system_prompt(tool_registry.as_ref());
+    let system_prompt = load_system_prompt(tool_registry.as_ref(), config);
     let memory_store = if config.memory.enabled {
         provider_registry
             .get(&config.memory.embedding_provider)
