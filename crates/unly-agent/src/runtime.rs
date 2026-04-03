@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 
 use unly_core::{
     model::{ChatMessage, ChatMessageContent, ChatRequest, StreamChunk},
+    permissions::Permission,
     provider::Provider,
     tool::ToolContext,
     Result,
@@ -81,13 +82,22 @@ impl AgentRuntime {
         ctx: &mut AgentContext,
         user_message: impl Into<String>,
     ) -> Result<AgentResponse> {
-        let user_msg = user_message.into();
+        self.process_input(ctx, ChatMessageContent::Text(user_message.into()))
+            .await
+    }
+
+    pub async fn process_input(
+        &self,
+        ctx: &mut AgentContext,
+        user_input: ChatMessageContent,
+    ) -> Result<AgentResponse> {
+        let user_msg = user_input_for_memory(&user_input);
         let memory_ctx = self.build_memory_context(ctx, &user_msg).await;
         let user_msg_for_memory = user_msg.clone();
 
         ctx.push_message(ChatMessage {
             role: "user".to_string(),
-            content: ChatMessageContent::Text(user_msg.clone()),
+            content: user_input,
             tool_call_id: None,
             tool_calls: None,
             name: None,
@@ -101,6 +111,9 @@ impl AgentRuntime {
         let tool_defs = self.build_tool_defs();
         let provider = self.get_provider(&ctx.provider)?;
         let mut loop_count = 0u32;
+        let mut forced_tool_retry = false;
+        let preapproved_tools =
+            ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools);
 
         let final_response = loop {
             ctx.trim_to(self.config.context_window_size);
@@ -141,6 +154,7 @@ impl AgentRuntime {
                 });
 
                 let mut pending_approval: Vec<PendingApproval> = Vec::new();
+                let mut tool_limit_exceeded = false;
 
                 for tc in tool_calls {
                     let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
@@ -156,6 +170,7 @@ impl AgentRuntime {
                     loop_count += 1;
                     if loop_count > self.config.max_tool_calls_per_turn {
                         warn!("max tool calls per turn exceeded");
+                        tool_limit_exceeded = true;
                         break;
                     }
 
@@ -171,7 +186,7 @@ impl AgentRuntime {
 
                     let result = self
                         .tool_registry
-                        .execute(&tc.function.name, args.clone(), tool_ctx, false)
+                        .execute(&tc.function.name, args.clone(), tool_ctx, preapproved_tools)
                         .await;
 
                     match result {
@@ -254,12 +269,41 @@ impl AgentRuntime {
                         pending: pending_approval,
                     });
                 }
+                if tool_limit_exceeded {
+                    return Err(unly_core::Error::Agent(
+                        "max tool calls per turn exceeded".to_string(),
+                    ));
+                }
 
                 continue;
             }
 
             // --- RESPONSE PHASE: no tool calls — this is the final answer ---
             let raw_text = response.content.unwrap_or_default();
+            if !forced_tool_retry
+                && !tool_defs.is_empty()
+                && looks_like_manual_confirmation_request(&raw_text)
+            {
+                forced_tool_retry = true;
+                ctx.push_message(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: ChatMessageContent::Text(raw_text),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                });
+                ctx.push_message(ChatMessage {
+                    role: "system".to_string(),
+                    content: ChatMessageContent::Text(
+                        "Do not ask for permission in plain text. If a tool is required, call the tool now and let runtime handle approval via Approve/Deny."
+                            .to_string(),
+                    ),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                });
+                continue;
+            }
             // Strip <think>…</think> blocks from the user-visible response.
             let mut text = strip_thinking_tags(&raw_text);
             if self.config.force_plain_output {
@@ -291,13 +335,23 @@ impl AgentRuntime {
         user_message: impl Into<String>,
         sender: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        let user_msg = user_message.into();
+        self.process_stream_input(ctx, ChatMessageContent::Text(user_message.into()), sender)
+            .await
+    }
+
+    pub async fn process_stream_input(
+        &self,
+        ctx: &mut AgentContext,
+        user_input: ChatMessageContent,
+        sender: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        let user_msg = user_input_for_memory(&user_input);
         let memory_ctx = self.build_memory_context(ctx, &user_msg).await;
         let user_msg_for_memory = user_msg.clone();
 
         ctx.push_message(ChatMessage {
             role: "user".to_string(),
-            content: ChatMessageContent::Text(user_msg.clone()),
+            content: user_input,
             tool_call_id: None,
             tool_calls: None,
             name: None,
@@ -311,6 +365,9 @@ impl AgentRuntime {
         let tool_defs = self.build_tool_defs();
         let provider = self.get_provider(&ctx.provider)?;
         let mut loop_count = 0u32;
+        let mut forced_tool_retry = false;
+        let preapproved_tools =
+            ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools);
 
         loop {
             ctx.trim_to(self.config.context_window_size);
@@ -351,6 +408,7 @@ impl AgentRuntime {
                 });
 
                 let mut pending_approval: Vec<PendingApproval> = Vec::new();
+                let mut tool_limit_exceeded = false;
 
                 for tc in tool_calls {
                     let args: serde_json::Value =
@@ -359,6 +417,7 @@ impl AgentRuntime {
                     loop_count += 1;
                     if loop_count > self.config.max_tool_calls_per_turn {
                         warn!("max tool calls per turn exceeded");
+                        tool_limit_exceeded = true;
                         break;
                     }
 
@@ -373,7 +432,7 @@ impl AgentRuntime {
 
                     let result = self
                         .tool_registry
-                        .execute(&tc.function.name, args.clone(), tool_ctx, false)
+                        .execute(&tc.function.name, args.clone(), tool_ctx, preapproved_tools)
                         .await;
 
                     match result {
@@ -452,7 +511,38 @@ impl AgentRuntime {
                         .await;
                     return Ok(());
                 }
+                if tool_limit_exceeded {
+                    return Err(unly_core::Error::Agent(
+                        "max tool calls per turn exceeded".to_string(),
+                    ));
+                }
 
+                continue;
+            }
+
+            let probe_text = response.content.clone().unwrap_or_default();
+            if !forced_tool_retry
+                && !tool_defs.is_empty()
+                && looks_like_manual_confirmation_request(&probe_text)
+            {
+                forced_tool_retry = true;
+                ctx.push_message(ChatMessage {
+                    role: "assistant".to_string(),
+                    content: ChatMessageContent::Text(probe_text),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                });
+                ctx.push_message(ChatMessage {
+                    role: "system".to_string(),
+                    content: ChatMessageContent::Text(
+                        "Do not ask for permission in plain text. If a tool is required, call the tool now and let runtime handle approval via Approve/Deny."
+                            .to_string(),
+                    ),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                });
                 continue;
             }
 
@@ -866,6 +956,42 @@ impl AgentRuntime {
             let _ = f.write_all(entry.as_bytes());
         }
     }
+}
+
+fn user_input_for_memory(input: &ChatMessageContent) -> String {
+    match input {
+        ChatMessageContent::Text(text) => text.clone(),
+        ChatMessageContent::Parts(parts) => {
+            let mut lines = Vec::new();
+            for part in parts {
+                match part {
+                    unly_core::model::ContentPart::Text { text } => lines.push(text.clone()),
+                    unly_core::model::ContentPart::ImageUrl { .. } => {
+                        lines.push("[image attached]".to_string())
+                    }
+                }
+            }
+            lines.join("\n")
+        }
+    }
+}
+
+fn looks_like_manual_confirmation_request(text: &str) -> bool {
+    let t = text.to_lowercase();
+    let has_confirm_phrase = t.contains("confirm")
+        || t.contains("do you approve")
+        || t.contains("requires explicit approval")
+        || t.contains("permission")
+        || t.contains("want me to proceed")
+        || t.contains("shall i proceed")
+        || t.contains("подтверд")
+        || t.contains("разреш")
+        || t.contains("можно");
+    has_confirm_phrase
+        || t.contains("моя текущая среда не поддерживает")
+        || t.contains("current environment does not support")
+        || t.contains("you can either")
+        || t.contains("что предпочтительнее")
 }
 
 /// Response from the agent runtime (non-streaming mode).

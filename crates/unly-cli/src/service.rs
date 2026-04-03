@@ -10,10 +10,31 @@ use unly_providers::{
     copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
 };
 use unly_tools::{
-    builtin::{FsListTool, FsReadTool, GitLogTool, GitStatusTool, HttpGetTool, HttpPostTool},
+    builtin::{
+        create_scheduler, CronJobTool, FsListTool, FsReadTool, FsWriteTool, GitLogTool,
+        GitStatusTool, HttpGetTool, HttpPostTool, SpawnSubagentTool,
+    },
     policy::ExecutionPolicy,
     ToolRegistry,
 };
+
+fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
+    if enabled.is_empty() {
+        return enabled;
+    }
+    for name in [
+        "fs_read",
+        "fs_list",
+        "fs_write",
+        "spawn_subagent",
+        "cron_job",
+    ] {
+        if !enabled.iter().any(|t| t == name) {
+            enabled.push(name.to_string());
+        }
+    }
+    enabled
+}
 
 /// Build the provider registry from config.
 pub async fn build_providers(config: &AppConfig) -> Result<Arc<ProviderRegistry>> {
@@ -63,7 +84,7 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
 
     let mut registry = ToolRegistry::new(
         policy,
-        config.tools.enabled_tools.clone(),
+        ensure_core_native_tools(config.tools.enabled_tools.clone()),
         config.tools.disabled_tools.clone(),
     );
 
@@ -71,6 +92,7 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     registry.register(HttpPostTool::new());
     registry.register(FsReadTool);
     registry.register(FsListTool);
+    registry.register(FsWriteTool);
     registry.register(GitStatusTool);
     registry.register(GitLogTool);
     registry.register(unly_tools::builtin::ShellTool::new(
@@ -83,8 +105,51 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
         config.tools.shell_working_dir.clone(),
         config.tools.require_approval_for_dangerous,
     ));
+    registry.register(SpawnSubagentTool);
 
     Arc::new(registry)
+}
+
+pub fn build_tools_with_scheduler(
+    config: &AppConfig,
+    db: Database,
+) -> (Arc<ToolRegistry>, Arc<unly_scheduler::Scheduler>) {
+    let policy = ExecutionPolicy {
+        require_approval_for_privileged: config.tools.require_approval_for_privileged,
+        require_approval_for_dangerous: config.tools.require_approval_for_dangerous,
+        max_execution_seconds: config.tools.max_execution_seconds,
+        max_concurrent: config.tools.max_concurrent_executions,
+        shell_allowlist: config.tools.shell_allowlist.clone(),
+    };
+
+    let mut registry = ToolRegistry::new(
+        policy,
+        ensure_core_native_tools(config.tools.enabled_tools.clone()),
+        config.tools.disabled_tools.clone(),
+    );
+
+    registry.register(HttpGetTool::new());
+    registry.register(HttpPostTool::new());
+    registry.register(FsReadTool);
+    registry.register(FsListTool);
+    registry.register(FsWriteTool);
+    registry.register(GitStatusTool);
+    registry.register(GitLogTool);
+    registry.register(unly_tools::builtin::ShellTool::new(
+        config.tools.shell_allowlist.clone(),
+        config.tools.shell_working_dir.clone(),
+        config.tools.require_approval_for_dangerous,
+    ));
+    registry.register(unly_tools::builtin::BashTool::new(
+        config.tools.shell_allowlist.clone(),
+        config.tools.shell_working_dir.clone(),
+        config.tools.require_approval_for_dangerous,
+    ));
+    registry.register(SpawnSubagentTool);
+    let scheduler = create_scheduler(db.clone(), &config.scheduler);
+    registry.register(CronJobTool::new(db, scheduler.clone()));
+
+    (Arc::new(registry), scheduler)
 }
 
 /// Load the agent system prompt from IDENTITY.md + SOUL.md (+ BOOT.md on first start).
@@ -107,12 +172,6 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry) -> String {
         let _ = std::fs::write(&id_path, workspace::DEFAULT_IDENTITY);
     }
     let boot_mode = workspace::is_boot_mode();
-    if boot_mode && !boot_path.exists() {
-        if let Some(parent) = boot_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&boot_path, workspace::DEFAULT_BOOT);
-    }
     if !soul_path.exists() {
         if let Some(parent) = soul_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -188,6 +247,10 @@ user approval before execution."
                 .to_string()
         }
     };
+    let approval_behavior_directive = "- Approval behavior: never ask for permission in plain text (no \"confirm?\", \"allow?\", \"shall I proceed?\"). \
+If a tool is needed, call the tool immediately and let runtime handle Approve/Deny. \
+For cron tasks, prefer the native `cron_job` tool. For delegated execution, prefer `spawn_subagent`."
+        .to_string();
 
     let capabilities = format!(
         r#"
@@ -195,7 +258,11 @@ user approval before execution."
 - Tools currently available in this runtime:
 {}
 {}
-- Native runtime capabilities include subagent spawning and terminal command execution (subject to policy/permissions).
+{}
+- Native runtime capabilities include:
+  - `spawn_subagent` for background delegated tasks with full runtime permissions (after approval by policy).
+  - `cron_job` for scheduled tasks (`create/list/enable/disable/run_now/delete`) with `notify_mode` support.
+  - terminal command execution tools (subject to policy/permissions).
 - Policy details:
   - require approval for privileged: {}
   - require approval for dangerous: {}
@@ -209,6 +276,7 @@ user approval before execution."
 "#,
         tool_lines,
         approval_directive,
+        approval_behavior_directive,
         policy.require_approval_for_privileged,
         policy.require_approval_for_dangerous,
         policy.max_execution_seconds,

@@ -159,3 +159,41 @@ fn empty_shell_allowlist_denies_all() {
     assert!(!policy.is_shell_allowed("ls"));
     assert!(!policy.is_shell_allowed("echo hi"));
 }
+
+#[tokio::test]
+async fn approved_bash_bypasses_allowlist() {
+    let policy = ExecutionPolicy {
+        require_approval_for_privileged: true,
+        require_approval_for_dangerous: true,
+        max_execution_seconds: 10,
+        max_concurrent: 4,
+        shell_allowlist: vec!["^ls(\\s|$)".to_string()],
+    };
+    let mut registry = ToolRegistry::new(policy, vec![], vec![]);
+    registry.register(unly_tools::builtin::BashTool::new(
+        vec!["^ls(\\s|$)".to_string()],
+        None,
+        true,
+    ));
+
+    let result = registry
+        .execute(
+            "bash",
+            json!({"command": "echo approved-run"}),
+            make_ctx(),
+            true,
+        )
+        .await
+        .expect("approved execution should not be denied");
+
+    assert!(
+        !result.is_error,
+        "approved bash should run: {}",
+        result.stderr
+    );
+    assert!(
+        result.stdout.contains("approved-run"),
+        "unexpected stdout: {}",
+        result.stdout
+    );
+}

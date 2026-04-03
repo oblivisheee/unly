@@ -157,3 +157,82 @@ impl Tool for FsListTool {
         }
     }
 }
+
+/// Tool: Write file contents.
+pub struct FsWriteTool;
+
+#[async_trait]
+impl Tool for FsWriteTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "fs_write".to_string(),
+            description:
+                "Write text to a file (overwrite by default, optional append). Creates parent directories if needed."
+                    .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type":"string","description":"Absolute or relative file path."},
+                    "content": {"type":"string","description":"Text content to write."},
+                    "append": {"type":"boolean","description":"Append instead of overwrite.","default": false}
+                },
+                "required": ["path", "content"]
+            }),
+            risk: ToolRisk::Privileged,
+            requires_approval: true,
+        }
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let start = Instant::now();
+        let path_str = args["path"]
+            .as_str()
+            .ok_or_else(|| unly_core::Error::InvalidInput("missing path argument".to_string()))?;
+        let content = args["content"].as_str().ok_or_else(|| {
+            unly_core::Error::InvalidInput("missing content argument".to_string())
+        })?;
+        let append = args["append"].as_bool().unwrap_or(false);
+
+        if path_str.contains("..") {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                "path traversal not allowed",
+                start.elapsed().as_millis() as u64,
+            ));
+        }
+
+        let path = PathBuf::from(path_str);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Ok(ToolResult::error(
+                    ctx.tool_call_id.clone(),
+                    e.to_string(),
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+        }
+
+        let result = if append {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, content.as_bytes()))
+        } else {
+            std::fs::write(&path, content.as_bytes())
+        };
+
+        match result {
+            Ok(_) => Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("written: {}", path.display()),
+                start.elapsed().as_millis() as u64,
+            )),
+            Err(e) => Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                e.to_string(),
+                start.elapsed().as_millis() as u64,
+            )),
+        }
+    }
+}

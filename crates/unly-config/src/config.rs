@@ -207,9 +207,12 @@ impl Default for ToolsConfig {
                 "http_post".to_string(),
                 "fs_read".to_string(),
                 "fs_list".to_string(),
+                "fs_write".to_string(),
                 "git_status".to_string(),
                 "git_log".to_string(),
                 "bash".to_string(),
+                "spawn_subagent".to_string(),
+                "cron_job".to_string(),
             ],
             disabled_tools: Vec::new(),
             require_approval_for_privileged: true,
@@ -234,6 +237,8 @@ pub struct AgentConfig {
     pub max_subagent_depth: u32,
     /// Maximum number of concurrent subagents.
     pub max_concurrent_subagents: usize,
+    /// Maximum number of child subagents a single subagent can create.
+    pub max_child_subagents_per_parent: usize,
     /// Maximum tokens per subagent run.
     pub subagent_token_budget: u32,
     /// Maximum tool calls per agent turn.
@@ -275,6 +280,7 @@ impl Default for AgentConfig {
         Self {
             max_subagent_depth: 3,
             max_concurrent_subagents: 4,
+            max_child_subagents_per_parent: 5,
             subagent_token_budget: 8192,
             max_tool_calls_per_turn: 10,
             max_turns: 100,

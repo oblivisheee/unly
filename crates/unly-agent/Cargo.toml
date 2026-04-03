@@ -25,3 +25,4 @@ uuid.workspace = true
 chrono.workspace = true
 parking_lot.workspace = true
 futures.workspace = true
+sea-orm.workspace = true

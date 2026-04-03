@@ -14,7 +14,7 @@ use unly_telegram::{SessionStore, TelegramBot};
 
 use crate::{
     logging::init_logging,
-    service::{build_providers, build_runtime, build_tools},
+    service::{build_providers, build_runtime, build_tools, build_tools_with_scheduler},
 };
 
 /// Unly - self-hosted personal AI agent platform.
@@ -159,7 +159,7 @@ impl Cli {
                 // Build subsystems.
                 let audit = Arc::new(AuditLogger::new(db.clone()));
                 let providers = build_providers(&config).await?;
-                let tools = build_tools(&config);
+                let (tools, scheduler) = build_tools_with_scheduler(&config, db.clone());
                 let runtime = build_runtime(
                     &config,
                     providers.clone(),
@@ -168,6 +168,11 @@ impl Cli {
                     Some(audit.clone()),
                 );
                 let sessions = SessionStore::new();
+                if config.scheduler.enabled {
+                    tokio::spawn(async move {
+                        scheduler.run().await;
+                    });
+                }
 
                 let config_arc = Arc::new(config);
                 let bot = Arc::new(TelegramBot::new(
@@ -521,7 +526,7 @@ impl Cli {
                 Ok(())
             }
 
-            Commands::Uninstall { skip } => run_uninstall_wizard(skip),
+            Commands::Uninstall { skip } => run_uninstall_wizard(skip).await,
         }
     }
 }
@@ -546,6 +551,12 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         if !overwrite {
             println!("Setup cancelled. Existing config unchanged.");
             return Ok(());
+        }
+        if let Err(e) = purge_subagents_from_existing_config(config_path).await {
+            println!(
+                "Warning: failed to clear subagents before config rewrite: {}",
+                e
+            );
         }
     }
 
@@ -774,8 +785,6 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         }
     }
 
-    let _ = workspace::mark_boot_complete();
-
     println!("\nConfiguration written to: {}", config_path.display());
     println!("\nNext steps:");
     println!("  1. Run: unly start");
@@ -783,9 +792,10 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn run_uninstall_wizard(skip: bool) -> Result<()> {
+async fn run_uninstall_wizard(skip: bool) -> Result<()> {
     let theme = ColorfulTheme::default();
     let workspace_dir = workspace::workspace_dir();
+    let config_path = workspace::default_config_path();
 
     println!("\nUnly Uninstall");
     println!("{}", "=".repeat(50));
@@ -797,6 +807,13 @@ fn run_uninstall_wizard(skip: bool) -> Result<()> {
     if !workspace_dir.exists() {
         println!("Workspace does not exist. Nothing to remove.");
         return Ok(());
+    }
+
+    if let Err(e) = purge_subagents_from_existing_config(&config_path).await {
+        println!(
+            "Warning: failed to clear subagents before workspace removal: {}",
+            e
+        );
     }
 
     if !skip {
@@ -826,5 +843,28 @@ fn run_uninstall_wizard(skip: bool) -> Result<()> {
         .with_context(|| format!("removing workspace {}", workspace_dir.display()))?;
 
     println!("Unly workspace removed: {}", workspace_dir.display());
+    Ok(())
+}
+
+async fn purge_subagents_from_existing_config(config_path: &PathBuf) -> Result<()> {
+    if let Err(e) = workspace::clear_subagent_logs() {
+        println!("Warning: failed to clear subagent logs: {}", e);
+    }
+    if !config_path.exists() {
+        return Ok(());
+    }
+    let config = load_config(config_path)
+        .with_context(|| format!("loading config from {}", config_path.display()))?;
+    let db = Database::connect_with_config(&config.database)
+        .await
+        .context("connecting to database for subagent cleanup")?;
+    let deleted = db
+        .delete_all_subagents()
+        .await
+        .context("deleting subagents from database")?;
+    if deleted > 0 {
+        println!("Deleted {} subagent records.", deleted);
+    }
+    db.close().await;
     Ok(())
 }

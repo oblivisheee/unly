@@ -17,4 +17,4 @@ pub mod subagent;
 pub use context::{AgentContext, ThinkingStep};
 pub use error::AgentError;
 pub use runtime::{AgentResponse, AgentRuntime, AgentRuntimeConfig, StreamEvent};
-pub use subagent::{SubagentHandle, SubagentRequest};
+pub use subagent::{SubagentHandle, SubagentManager, SubagentRequest, SubagentSpawnConfig};

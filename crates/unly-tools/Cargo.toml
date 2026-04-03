@@ -9,6 +9,8 @@ license.workspace = true
 [dependencies]
 unly-core.workspace = true
 unly-config.workspace = true
+unly-db.workspace = true
+unly-scheduler.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -21,6 +23,9 @@ uuid.workspace = true
 chrono.workspace = true
 regex.workspace = true
 url.workspace = true
+once_cell.workspace = true
+parking_lot.workspace = true
+sea-orm.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

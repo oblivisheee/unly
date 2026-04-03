@@ -1,9 +1,14 @@
 use async_trait::async_trait;
+use chrono::Utc;
+use once_cell::sync::Lazy;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Instant;
 use tokio::process::Command;
+use uuid::Uuid;
 
 use unly_core::{
     tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
@@ -14,12 +19,26 @@ use unly_core::{
 ///
 /// IMPORTANT: This tool is Dangerous and always requires approval.
 /// The command must match the configured shell_allowlist policy.
-/// Executed via /bin/sh -c with restricted environment.
+/// Executed via /bin/sh -lc with restricted environment.
 pub struct ShellTool {
     allowlist: Vec<String>,
     working_dir: Option<PathBuf>,
     requires_approval: bool,
 }
+
+#[derive(Debug, Clone)]
+struct BashJobStatus {
+    status: String,
+    command: String,
+    started_at: String,
+    finished_at: Option<String>,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+static BASH_JOBS: Lazy<Mutex<HashMap<String, BashJobStatus>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 impl ShellTool {
     pub fn new(
@@ -66,11 +85,14 @@ impl ShellTool {
     ) -> ToolResult {
         let mut cmd = Command::new(program);
         cmd.args(program_args).arg(command);
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         // Restricted environment: only essential vars.
+        // Using login-shell semantics lets shell startup files populate PATH.
         cmd.env_clear();
-        cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin");
+        cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin");
+        cmd.env("CI", "1");
         if let Ok(home) = std::env::var("HOME") {
             cmd.env("HOME", home);
         }
@@ -125,9 +147,18 @@ impl Tool for ShellTool {
                     "working_dir": {
                         "type": "string",
                         "description": "Optional working directory for the command."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "description": "Execution mode: run (default), start (background), or status.",
+                        "enum": ["run", "start", "status"]
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Required for mode=status. Job id returned by mode=start."
                     }
                 },
-                "required": ["command"]
+                "required": []
             }),
             risk: ToolRisk::Dangerous,
             requires_approval: self.requires_approval,
@@ -136,12 +167,50 @@ impl Tool for ShellTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let start = Instant::now();
+        let approved = args
+            .get("__approved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mode = args["mode"].as_str().unwrap_or("run");
+        if mode == "status" {
+            let job_id = args["job_id"].as_str().ok_or_else(|| {
+                unly_core::Error::InvalidInput(
+                    "missing job_id argument for status mode".to_string(),
+                )
+            })?;
+            let jobs = BASH_JOBS.lock().map_err(|_| {
+                unly_core::Error::Agent("bash job status lock poisoned".to_string())
+            })?;
+            if let Some(job) = jobs.get(job_id) {
+                return Ok(ToolResult::success(
+                    ctx.tool_call_id.clone(),
+                    serde_json::to_string(&json!({
+                        "job_id": job_id,
+                        "status": job.status,
+                        "command": job.command,
+                        "started_at": job.started_at,
+                        "finished_at": job.finished_at,
+                        "exit_code": job.exit_code,
+                        "stdout": job.stdout,
+                        "stderr": job.stderr
+                    }))
+                    .unwrap_or_else(|_| "{}".to_string()),
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                format!("job not found: {}", job_id),
+                start.elapsed().as_millis() as u64,
+            ));
+        }
+
         let command = args["command"].as_str().ok_or_else(|| {
             unly_core::Error::InvalidInput("missing command argument".to_string())
         })?;
 
         // Policy: check allowlist.
-        if !self.is_allowed(command) {
+        if !approved && !self.is_allowed(command) {
             return Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 format!("command not in allowlist: {}", command),
@@ -150,8 +219,84 @@ impl Tool for ShellTool {
         }
 
         let working_dir = self.resolve_working_dir(&args);
+        if mode == "start" {
+            let job_id = Uuid::new_v4().to_string();
+            {
+                let mut jobs = BASH_JOBS.lock().map_err(|_| {
+                    unly_core::Error::Agent("bash job state lock poisoned".to_string())
+                })?;
+                jobs.insert(
+                    job_id.clone(),
+                    BashJobStatus {
+                        status: "running".to_string(),
+                        command: command.to_string(),
+                        started_at: Utc::now().to_rfc3339(),
+                        finished_at: None,
+                        exit_code: None,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                );
+            }
+            let program = "/bin/sh".to_string();
+            let program_args = vec!["-lc".to_string()];
+            let command = command.to_string();
+            let job_id_for_task = job_id.clone();
+            tokio::spawn(async move {
+                let mut cmd = Command::new(program);
+                cmd.args(program_args).arg(command.clone());
+                cmd.stdin(Stdio::null());
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                cmd.env_clear();
+                cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin");
+                cmd.env("CI", "1");
+                if let Ok(home) = std::env::var("HOME") {
+                    cmd.env("HOME", home);
+                }
+                if let Some(dir) = working_dir {
+                    cmd.current_dir(dir);
+                }
+                let finished_at = Utc::now().to_rfc3339();
+                match cmd.output().await {
+                    Ok(output) => {
+                        if let Ok(mut jobs) = BASH_JOBS.lock() {
+                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
+                                job.status = if output.status.success() {
+                                    "completed".to_string()
+                                } else {
+                                    "failed".to_string()
+                                };
+                                job.finished_at = Some(finished_at);
+                                job.exit_code = output.status.code();
+                                job.stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                                job.stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut jobs) = BASH_JOBS.lock() {
+                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
+                                job.status = "failed".to_string();
+                                job.finished_at = Some(finished_at);
+                                job.exit_code = Some(1);
+                                job.stderr = e.to_string();
+                            }
+                        }
+                    }
+                }
+            });
+            return Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!(
+                    "Bash started in background.\njob_id={}\nUse mode=status with this job_id to query progress.",
+                    job_id
+                ),
+                start.elapsed().as_millis() as u64,
+            ));
+        }
         Ok(self
-            .execute_with_program("/bin/sh", &["-c"], command, working_dir, ctx, start)
+            .execute_with_program("/bin/sh", &["-lc"], command, working_dir, ctx, start)
             .await)
     }
 }
@@ -192,10 +337,27 @@ impl Tool for BashTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let start = Instant::now();
+        let approved = args
+            .get("__approved")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mode = args["mode"].as_str().unwrap_or("run");
+        if mode == "status" {
+            let mut shell_args = args.clone();
+            if shell_args.get("job_id").is_none() {
+                return Ok(ToolResult::error(
+                    ctx.tool_call_id.clone(),
+                    "missing job_id argument for status mode".to_string(),
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+            shell_args["mode"] = Value::String("status".to_string());
+            return self.inner.execute(shell_args, ctx).await;
+        }
         let command = args["command"].as_str().ok_or_else(|| {
             unly_core::Error::InvalidInput("missing command argument".to_string())
         })?;
-        if !self.inner.is_allowed(command) {
+        if !approved && !self.inner.is_allowed(command) {
             return Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),
                 format!("command not in allowlist: {}", command),
@@ -203,6 +365,80 @@ impl Tool for BashTool {
             ));
         }
         let working_dir = self.inner.resolve_working_dir(&args);
+        if mode == "start" {
+            let job_id = Uuid::new_v4().to_string();
+            {
+                let mut jobs = BASH_JOBS.lock().map_err(|_| {
+                    unly_core::Error::Agent("bash job state lock poisoned".to_string())
+                })?;
+                jobs.insert(
+                    job_id.clone(),
+                    BashJobStatus {
+                        status: "running".to_string(),
+                        command: command.to_string(),
+                        started_at: Utc::now().to_rfc3339(),
+                        finished_at: None,
+                        exit_code: None,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                );
+            }
+            let wrapped = format!("set -o pipefail; {}", command);
+            let job_id_for_task = job_id.clone();
+            tokio::spawn(async move {
+                let mut cmd = Command::new("/usr/bin/env");
+                cmd.args(["bash", "-lc"]).arg(wrapped);
+                cmd.stdin(Stdio::null());
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                cmd.env_clear();
+                cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin");
+                cmd.env("CI", "1");
+                if let Ok(home) = std::env::var("HOME") {
+                    cmd.env("HOME", home);
+                }
+                if let Some(dir) = working_dir {
+                    cmd.current_dir(dir);
+                }
+                let finished_at = Utc::now().to_rfc3339();
+                match cmd.output().await {
+                    Ok(output) => {
+                        if let Ok(mut jobs) = BASH_JOBS.lock() {
+                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
+                                job.status = if output.status.success() {
+                                    "completed".to_string()
+                                } else {
+                                    "failed".to_string()
+                                };
+                                job.finished_at = Some(finished_at);
+                                job.exit_code = output.status.code();
+                                job.stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                                job.stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if let Ok(mut jobs) = BASH_JOBS.lock() {
+                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
+                                job.status = "failed".to_string();
+                                job.finished_at = Some(finished_at);
+                                job.exit_code = Some(1);
+                                job.stderr = e.to_string();
+                            }
+                        }
+                    }
+                }
+            });
+            return Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!(
+                    "Background bash job started.\njob_id={}\nUse mode=status with this job_id to query progress.",
+                    job_id
+                ),
+                start.elapsed().as_millis() as u64,
+            ));
+        }
         // Use a real bash invocation and pipefail for reliable exit behavior.
         let wrapped = format!("set -o pipefail; {}", command);
         Ok(self

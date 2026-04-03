@@ -1,4 +1,6 @@
-use sea_orm::{ConnectOptions, Database as SeaDatabase, DatabaseConnection};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection, Statement,
+};
 use sea_orm_migration::MigratorTrait;
 use std::path::Path;
 use std::time::Duration;
@@ -151,8 +153,18 @@ impl Database {
 
     /// Verify the database is reachable.
     pub async fn health_check(&self) -> DbResult<()> {
-        use sea_orm::ConnectionTrait;
         self.conn.execute_unprepared("SELECT 1").await?;
         Ok(())
+    }
+
+    /// Delete all persisted subagent rows.
+    pub async fn delete_all_subagents(&self) -> DbResult<u64> {
+        let backend = match self.db_type {
+            DbType::Postgres => sea_orm::DatabaseBackend::Postgres,
+            DbType::Sqlite => sea_orm::DatabaseBackend::Sqlite,
+        };
+        let stmt = Statement::from_string(backend, "DELETE FROM subagents".to_string());
+        let result = self.conn.execute(stmt).await?;
+        Ok(result.rows_affected())
     }
 }

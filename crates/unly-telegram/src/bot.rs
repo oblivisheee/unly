@@ -1,7 +1,9 @@
+use base64::Engine;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::{
+    net::Download,
     prelude::*,
     types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ParseMode},
     utils::command::BotCommands,
@@ -9,20 +11,23 @@ use teloxide::{
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
-use unly_agent::{AgentContext, AgentResponse, AgentRuntime, StreamEvent};
+use unly_agent::{
+    AgentContext, AgentResponse, AgentRuntime, StreamEvent, SubagentManager, SubagentRequest,
+    SubagentSpawnConfig,
+};
 use unly_audit::AuditLogger;
 use unly_config::{workspace, AppConfig, DbType};
-use unly_core::ids::ChatId;
+use unly_core::model::{ChatMessageContent, ContentPart, ImageUrl};
+use unly_core::{ids::ChatId, permissions::Permission};
 use unly_db::Database;
 use unly_providers::ProviderRegistry;
+use unly_tools::builtin::{register_cron_executor, register_subagent_executor};
 
 use crate::{
     commands::Command,
     permissions::{build_permissions, is_allowed},
-    session::SessionStore,
+    session::{PendingSubagentSpawn, SessionStore},
 };
-
-const BOOT_DONE_PHRASES: [&str; 4] = ["done", "finish", "finished", "complete"];
 
 /// The main Telegram bot handler.
 pub struct TelegramBot {
@@ -32,6 +37,7 @@ pub struct TelegramBot {
     provider_registry: Arc<ProviderRegistry>,
     db: Database,
     audit: Arc<AuditLogger>,
+    subagents: Arc<SubagentManager>,
 }
 
 impl TelegramBot {
@@ -43,11 +49,120 @@ impl TelegramBot {
         db: Database,
         audit: Arc<AuditLogger>,
     ) -> Self {
+        let subagent_cfg = SubagentSpawnConfig {
+            max_depth: config.agent.max_subagent_depth,
+            max_concurrent: config.agent.max_concurrent_subagents,
+            max_children_per_parent: config.agent.max_child_subagents_per_parent,
+            token_budget: config.agent.subagent_token_budget,
+        };
+        let subagents = Arc::new(SubagentManager::new(subagent_cfg, db.clone()));
+        let runtime_for_subagent_tool = runtime.clone();
+        let runtime_for_cron_tool = runtime.clone();
+        let subagents_for_tool = subagents.clone();
+        let db_for_tool = db.clone();
+        let db_for_cron = db.clone();
+        let token_for_tool = config.telegram.bot_token.clone();
+        let token_for_cron = config.telegram.bot_token.clone();
+        let default_provider = config.providers.default_provider.clone();
+        let default_model = config.providers.default_model.clone();
+        let subagent_default_provider = default_provider.clone();
+        let subagent_default_model = default_model.clone();
+        let cron_default_provider = default_provider.clone();
+        let cron_default_model = default_model.clone();
+        let subagent_token_budget = config.agent.subagent_token_budget;
+
+        register_subagent_executor(Arc::new(
+            move |goal, chat_id, provider, model, permissions, parent_agent_id| {
+                let subagents = subagents_for_tool.clone();
+                let runtime = runtime_for_subagent_tool.clone();
+                let db = db_for_tool.clone();
+                let token = token_for_tool.clone();
+                let provider_fallback = subagent_default_provider.clone();
+                let model_fallback = subagent_default_model.clone();
+                Box::pin(async move {
+                    let request = SubagentRequest {
+                        goal: goal.clone(),
+                        parent_agent_id: parent_agent_id.unwrap_or_default(),
+                        depth: 0,
+                        permissions,
+                        provider: Some(provider.unwrap_or(provider_fallback)),
+                        model: Some(model.unwrap_or(model_fallback)),
+                        token_budget: subagent_token_budget,
+                    };
+                    let handle = subagents
+                        .spawn_background(request, runtime, chat_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                    if let Some(tg_chat_id) = resolve_telegram_chat_id(&db, chat_id).await {
+                        let bot = Bot::new(token);
+                        let _ = bot
+                            .send_message(
+                                teloxide::types::ChatId(tg_chat_id),
+                                format!("Subagent spawned with task: {}", shorten_goal(&goal)),
+                            )
+                            .await;
+                        let id = handle.id.to_string();
+                        let subagents = subagents.clone();
+                        tokio::spawn(async move {
+                            wait_and_notify_subagent_result(
+                                &bot,
+                                &subagents,
+                                teloxide::types::ChatId(tg_chat_id),
+                                id,
+                            )
+                            .await;
+                        });
+                    }
+                    Ok(handle.id.to_string())
+                })
+            },
+        ));
+
+        register_cron_executor(Arc::new(move |task, chat_id, notify_mode, trigger| {
+            let runtime = runtime_for_cron_tool.clone();
+            let db = db_for_cron.clone();
+            let token = token_for_cron.clone();
+            let provider = cron_default_provider.clone();
+            let model = cron_default_model.clone();
+            Box::pin(async move {
+                let mut ctx = AgentContext::new(
+                    chat_id,
+                    None,
+                    unly_core::permissions::PermissionSet::admin(),
+                    provider,
+                    model,
+                    runtime.config().system_prompt.clone(),
+                );
+                let result_text = match runtime.process(&mut ctx, task.clone()).await {
+                    Ok(AgentResponse::Text(text)) => text,
+                    Ok(AgentResponse::ApprovalRequired { pending }) => {
+                        format!("approval required for {} tool calls", pending.len())
+                    }
+                    Err(e) => return Err(e.to_string()),
+                };
+                if notify_mode == "message" {
+                    if let Some(tg_chat_id) = resolve_telegram_chat_id(&db, chat_id).await {
+                        let bot = Bot::new(token);
+                        let notify = format!(
+                            "Cron job executed ({})\nTask: {}\nResult: {}",
+                            trigger, task, result_text
+                        );
+                        let _ = bot
+                            .send_message(teloxide::types::ChatId(tg_chat_id), notify)
+                            .await;
+                    }
+                }
+                Ok(result_text)
+            })
+        }));
+
         Self {
             config,
             sessions,
             runtime,
             provider_registry,
+            subagents,
             db,
             audit,
         }
@@ -150,7 +265,10 @@ impl TelegramBot {
             }
 
             Command::Help => {
-                let text = Command::descriptions().to_string();
+                let text = format!(
+                "{}\n\nTip: send text, documents, or photos — I can process attachments directly.",
+                Command::descriptions()
+            );
                 bot.send_message(msg.chat.id, text).await?;
             }
 
@@ -212,43 +330,17 @@ impl TelegramBot {
                 }
             }
 
-            Command::Subagent => {
-                let cfg = &self.config.agent;
-                let text = format!(
-                    "Subagents\n\n\
-• Maximum depth: {}\n\
-• Maximum concurrent subagents: {}\n\
-• Token budget per subagent: {}\n\n\
-Subagents are specialized execution contexts used for focused goals.",
-                    cfg.max_subagent_depth, cfg.max_concurrent_subagents, cfg.subagent_token_budget
-                );
-                bot.send_message(msg.chat.id, text).await?;
-            }
             Command::Subagents => {
-                let cfg = &self.config.agent;
-                let active = self.load_active_subagents().await;
-                let mut text = format!(
-                    "Subagents status\nMax depth: {}\nMax concurrent: {}\nToken budget: {}\n",
-                    cfg.max_subagent_depth, cfg.max_concurrent_subagents, cfg.subagent_token_budget
-                );
-                if active.is_empty() {
-                    text.push_str("\nActive: none");
-                } else {
-                    text.push_str("\nActive:\n");
-                    for s in active {
-                        text.push_str(&format!(
-                            "- {} [{}] depth={} model={}\n",
-                            s.id,
-                            s.status,
-                            s.depth,
-                            s.model.unwrap_or_else(|| "default".to_string())
-                        ));
-                    }
-                }
-                bot.send_message(msg.chat.id, text).await?;
+                self.send_subagents_menu(&bot, msg.chat.id, SubagentMenuView::Active)
+                    .await?;
             }
 
             Command::Approve => {
+                if self.sessions.has_pending_subagent(tg_chat_id) {
+                    self.approve_pending_subagent(&bot, msg.chat.id, tg_chat_id)
+                        .await?;
+                    return Ok(());
+                }
                 if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     if ctx.pending_approvals.is_empty() {
                         bot.send_message(msg.chat.id, "ℹ No pending approvals.")
@@ -281,10 +373,7 @@ Subagents are specialized execution contexts used for focused goals.",
                                 pending.iter().map(|p| p.tool_name.as_str()).collect();
                             bot.send_message(
                                 msg.chat.id,
-                                format!(
- " Further approval required for: {}\n\nUse /approve to continue or /deny to cancel.",
- names.join(", ")
- ),
+                                format!("Further approval required for: {}", names.join(", ")),
                             )
                             .await?;
                         }
@@ -300,6 +389,12 @@ Subagents are specialized execution contexts used for focused goals.",
             }
 
             Command::Deny => {
+                if self.sessions.has_pending_subagent(tg_chat_id) {
+                    let _ = self.sessions.take_pending_subagent(tg_chat_id);
+                    bot.send_message(msg.chat.id, "Subagent creation denied.")
+                        .await?;
+                    return Ok(());
+                }
                 if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     let pending = std::mem::take(&mut ctx.pending_approvals);
                     self.sessions.set(tg_chat_id, ctx);
@@ -330,16 +425,16 @@ Subagents are specialized execution contexts used for focused goals.",
                 "auto" => {
                     self.sessions.set_auto_approve(tg_chat_id, true);
                     bot.send_message(
-                            msg.chat.id,
-                            "Approval mode set to AUTO. Pending tool actions will be approved automatically.",
-                        )
-                        .await?;
+                        msg.chat.id,
+                        "Approval mode set to AUTO. Tool actions run without approve/deny prompts.",
+                    )
+                    .await?;
                 }
                 "manual" => {
                     self.sessions.set_auto_approve(tg_chat_id, false);
                     bot.send_message(
                         msg.chat.id,
-                        "Approval mode set to MANUAL. Use /approve or /deny for pending actions.",
+                        "Approval mode set to MANUAL. Pending actions require explicit approval.",
                     )
                     .await?;
                 }
@@ -380,31 +475,112 @@ Subagents are specialized execution contexts used for focused goals.",
             return Ok(());
         }
 
-        let text = match msg.text() {
-            Some(t) => t.to_string(),
-            None => {
-                // Handle file uploads gracefully.
-                if msg.document().is_some() || msg.photo().is_some() {
-                    bot.send_message(
- msg.chat.id,
- " I received a file. File processing is not yet fully implemented in this version.",
- )
- .await?;
-                }
+        let user_input = match self.build_user_input_from_message(&bot, &msg).await {
+            Ok(Some(input)) => input,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                error!(chat_id = tg_chat_id, error = %e, "failed to parse telegram attachments");
+                bot.send_message(
+                    msg.chat.id,
+                    "Could not process the attached file/photo. Please try again.",
+                )
+                .await?;
                 return Ok(());
             }
         };
+        let text = user_input_for_storage(&user_input);
+
+        if self.sessions.has_pending_subagent(tg_chat_id) && is_affirmative_approval(&text) {
+            self.approve_pending_subagent(&bot, msg.chat.id, tg_chat_id)
+                .await?;
+            return Ok(());
+        }
+        if let Some(mut pending_ctx) = self.sessions.get(tg_chat_id) {
+            if !pending_ctx.pending_approvals.is_empty() {
+                if self.sessions.get_flags(tg_chat_id).auto_approve {
+                    let mut response = self.runtime.process_approved(&mut pending_ctx).await;
+                    for _ in 0..8 {
+                        match response {
+                            Ok(AgentResponse::ApprovalRequired { .. }) => {
+                                response = self.runtime.process_approved(&mut pending_ctx).await;
+                            }
+                            _ => break,
+                        }
+                    }
+                    self.sessions.set(tg_chat_id, pending_ctx);
+                    match response {
+                        Ok(AgentResponse::Text(answer)) => {
+                            send_response_text(&bot, msg.chat.id, &answer).await?;
+                        }
+                        Ok(AgentResponse::ApprovalRequired { pending }) => {
+                            let details = format_pending_approvals(&pending);
+                            let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                                InlineKeyboardButton::callback("Approve", "approve"),
+                                InlineKeyboardButton::callback("Deny", "deny"),
+                            ]]);
+                            bot.send_message(
+                                msg.chat.id,
+                                format!("The agent wants to use:\n{}\n\nDo you approve?", details),
+                            )
+                            .parse_mode(ParseMode::Html)
+                            .reply_markup(keyboard)
+                            .await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
+                                .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+                if is_affirmative_approval(&text) {
+                    let response = self.runtime.process_approved(&mut pending_ctx).await;
+                    self.sessions.set(tg_chat_id, pending_ctx);
+                    match response {
+                        Ok(AgentResponse::Text(answer)) => {
+                            send_response_text(&bot, msg.chat.id, &answer).await?;
+                        }
+                        Ok(AgentResponse::ApprovalRequired { pending }) => {
+                            let details = format_pending_approvals(&pending);
+                            let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                                InlineKeyboardButton::callback("Approve", "approve"),
+                                InlineKeyboardButton::callback("Deny", "deny"),
+                            ]]);
+                            bot.send_message(
+                                msg.chat.id,
+                                format!("The agent wants to use:\n{}\n\nDo you approve?", details),
+                            )
+                            .reply_markup(keyboard)
+                            .await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
+                                .await?;
+                        }
+                    }
+                    return Ok(());
+                }
+                if is_negative_approval(&text) {
+                    let denied = std::mem::take(&mut pending_ctx.pending_approvals);
+                    self.sessions.set(tg_chat_id, pending_ctx);
+                    let details = format_pending_approvals(&denied);
+                    bot.send_message(msg.chat.id, format!("Denied tool executions:\n{}", details))
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
 
         if workspace::is_boot_mode() {
-            if is_boot_done_signal(&text) {
-                let summary = build_boot_summary();
+            if self.should_finalize_boot(tg_user_id, &text).await {
+                let summary = self
+                    .build_boot_profile_update(tg_user_id)
+                    .await
+                    .unwrap_or_else(build_boot_summary);
                 match workspace::finalize_boot(&summary) {
                     Ok(()) => {
-                        bot.send_message(
-                            msg.chat.id,
-                            "BOOT completed.\n\nProfile processed and saved to MEMORY.md.\nBOOT.md was removed. Normal mode is now active.",
-                        )
-                        .await?;
+                        let done_text = self.generate_boot_done_message(tg_user_id).await;
+                        bot.send_message(msg.chat.id, done_text).await?;
                         return Ok(());
                     }
                     Err(e) => {
@@ -460,9 +636,64 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             )
         });
 
+        let trimmed = text.trim();
+        let subagent_goal = if let Some(goal) = parse_spawn_subagent_request(trimmed) {
+            Some(goal)
+        } else {
+            classify_subagent_spawn_request(self.runtime.clone(), ctx.clone(), trimmed).await
+        };
+        if let Some(goal) = subagent_goal {
+            // Persist session immediately so /approve can always resolve chat context.
+            self.sessions.set(tg_chat_id, ctx.clone());
+            self.sessions.set_pending_subagent(
+                tg_chat_id,
+                PendingSubagentSpawn {
+                    goal: goal.clone(),
+                    parent_agent_id: ctx.agent_id,
+                    depth: ctx.subagent_depth,
+                    provider: ctx.provider.clone(),
+                    model: ctx.model.clone(),
+                },
+            );
+            let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                InlineKeyboardButton::callback("Approve", "approve"),
+                InlineKeyboardButton::callback("Deny", "deny"),
+            ]]);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "Confirm subagent creation for task: {}\nThis will grant the subagent full command/tool permissions.",
+                    shorten_goal(&goal)
+                ),
+            )
+            .reply_markup(keyboard)
+            .await?;
+            return Ok(());
+        }
+
         // Send a "typing..." indicator.
         bot.send_chat_action(msg.chat.id, teloxide::types::ChatAction::Typing)
             .await?;
+        let typing_bot = bot.clone();
+        let typing_chat = msg.chat.id;
+        let (typing_stop_tx, mut typing_stop_rx) = tokio::sync::watch::channel(false);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(4));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let _ = typing_bot
+                            .send_chat_action(typing_chat, teloxide::types::ChatAction::Typing)
+                            .await;
+                    }
+                    changed = typing_stop_rx.changed() => {
+                        if changed.is_err() || *typing_stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
 
         // Persist the message.
         let chat_repo = unly_db::repo::chat::ChatRepo::new(self.db.conn());
@@ -498,9 +729,12 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         let sessions = self.sessions.clone();
         let mut ctx_clone = ctx.clone();
 
-        let text_clone = text.clone();
+        let input_clone = user_input.clone();
         tokio::spawn(async move {
-            if let Err(e) = runtime.process_stream(&mut ctx_clone, text_clone, tx).await {
+            if let Err(e) = runtime
+                .process_stream_input(&mut ctx_clone, input_clone, tx)
+                .await
+            {
                 error!(chat_id = tg_chat_id, error = %e, "agent stream processing failed");
             }
             sessions.set(tg_chat_id, ctx_clone);
@@ -556,45 +790,77 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
 
                     self.audit
                         .success("agent_message", tg_user_id.to_string(), "process_message");
+                    let _ = typing_stop_tx.send(true);
                     return Ok(());
                 }
                 StreamEvent::ApprovalRequired(pending) => {
+                    let _ = typing_stop_tx.send(true);
                     if self.sessions.get_flags(tg_chat_id).auto_approve {
                         if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
-                            let response = self.runtime.process_approved(&mut ctx).await;
+                            ctx.pending_approvals = pending.clone();
+                            let mut response = self.runtime.process_approved(&mut ctx).await;
+                            for _ in 0..8 {
+                                match response {
+                                    Ok(AgentResponse::ApprovalRequired { .. }) => {
+                                        response = self.runtime.process_approved(&mut ctx).await;
+                                    }
+                                    _ => break,
+                                }
+                            }
                             self.sessions.set(tg_chat_id, ctx);
                             match response {
                                 Ok(AgentResponse::Text(text)) => {
-                                    let _ = send_response_text(&bot, msg.chat.id, &text).await;
-                                    return Ok(());
+                                    if let Err(e) =
+                                        send_response_text(&bot, msg.chat.id, &text).await
+                                    {
+                                        error!(
+                                            chat_id = tg_chat_id,
+                                            error = %e,
+                                            "failed to send auto-approved response"
+                                        );
+                                    }
                                 }
-                                Ok(AgentResponse::ApprovalRequired { pending: _ }) => {
-                                    // Fall through to manual request.
+                                Ok(AgentResponse::ApprovalRequired { pending: p }) => {
+                                    let details = format_pending_approvals(&p);
+                                    let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                                        InlineKeyboardButton::callback("Approve", "approve"),
+                                        InlineKeyboardButton::callback("Deny", "deny"),
+                                    ]]);
+                                    let _ = bot
+                                        .send_message(
+                                            msg.chat.id,
+                                            format!(
+                                                "The agent wants to use:\n{}\n\nDo you approve?",
+                                                details
+                                            ),
+                                        )
+                                        .parse_mode(ParseMode::Html)
+                                        .reply_markup(keyboard)
+                                        .await;
                                 }
                                 Err(e) => {
-                                    bot.send_message(
-                                        msg.chat.id,
-                                        format!("Auto-approval failed: {}", e),
-                                    )
-                                    .await?;
-                                    return Ok(());
+                                    let _ = bot
+                                        .send_message(
+                                            msg.chat.id,
+                                            format!("Error after approval: {}", e),
+                                        )
+                                        .await;
                                 }
                             }
+                            return Ok(());
                         }
                     }
-                    let names: Vec<&str> = pending.iter().map(|p| p.tool_name.as_str()).collect();
                     let keyboard = InlineKeyboardMarkup::new(vec![vec![
                         InlineKeyboardButton::callback("Approve", "approve"),
                         InlineKeyboardButton::callback("Deny", "deny"),
                     ]]);
+                    let details = format_pending_approvals(&pending);
                     if let Err(e) = bot
                         .send_message(
                             msg.chat.id,
-                            format!(
-                                "The agent wants to use:\n{}\n\nDo you approve?",
-                                names.join(", ")
-                            ),
+                            format!("The agent wants to use:\n{}\n\nDo you approve?", details),
                         )
+                        .parse_mode(ParseMode::Html)
                         .reply_markup(keyboard)
                         .await
                     {
@@ -606,6 +872,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         }
 
         // Channel closed without Done (error case).
+        let _ = typing_stop_tx.send(true);
         self.audit.failure(
             "agent_message",
             tg_user_id.to_string(),
@@ -625,12 +892,11 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         Ok(())
     }
 
-    async fn load_active_subagents(&self) -> Vec<SubagentStatusRow> {
-        let sql = "SELECT id, status, depth, model \
+    async fn load_subagents(&self) -> Vec<SubagentStatusRow> {
+        let sql = "SELECT id, status, depth, goal, model, updated_at, parent_agent_id \
                    FROM subagents \
-                   WHERE status IN ('pending','running') \
                    ORDER BY updated_at DESC \
-                   LIMIT 10";
+                   LIMIT 20";
         let stmt = Statement::from_string(
             match self.db.db_type() {
                 DbType::Postgres => DatabaseBackend::Postgres,
@@ -650,7 +916,9 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                         .try_get("", "status")
                         .unwrap_or_else(|_| "unknown".to_string()),
                     depth: r.try_get("", "depth").unwrap_or_default(),
+                    goal: r.try_get("", "goal").ok(),
                     model: r.try_get("", "model").ok(),
+                    updated_at: r.try_get("", "updated_at").ok(),
                 })
                 .collect(),
             Err(e) => {
@@ -658,6 +926,90 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                 Vec::new()
             }
         }
+    }
+
+    async fn build_user_input_from_message(
+        &self,
+        bot: &Bot,
+        msg: &Message,
+    ) -> Result<Option<ChatMessageContent>, Box<dyn std::error::Error + Send + Sync>> {
+        let text = msg
+            .text()
+            .or(msg.caption())
+            .map(|t| t.to_string())
+            .unwrap_or_default();
+        let mut parts: Vec<ContentPart> = Vec::new();
+        if !text.trim().is_empty() {
+            parts.push(ContentPart::Text { text });
+        }
+
+        if let Some(doc) = msg.document() {
+            let file = bot.get_file(doc.file.id.clone()).await?;
+            let mut bytes = Vec::new();
+            bot.download_file(&file.path, &mut bytes).await?;
+            let mime = doc
+                .mime_type
+                .as_ref()
+                .map(|m| m.essence_str().to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let name = doc
+                .file_name
+                .clone()
+                .unwrap_or_else(|| "attachment".to_string());
+            if mime.starts_with("image/") {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let uri = format!("data:{};base64,{}", mime, b64);
+                parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: uri,
+                        detail: Some("high".to_string()),
+                    },
+                });
+            } else if let Ok(text_content) = String::from_utf8(bytes.clone()) {
+                let snippet: String = text_content.chars().take(24_000).collect();
+                parts.push(ContentPart::Text {
+                    text: format!("Attached file `{}` content:\n{}", name, snippet),
+                });
+            } else {
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let snippet: String = b64.chars().take(32_000).collect();
+                parts.push(ContentPart::Text {
+                    text: format!(
+                        "Attached binary file `{}` (mime: {}). Base64 preview:\n{}",
+                        name, mime, snippet
+                    ),
+                });
+            }
+            parts.push(ContentPart::Text {
+                text: format!("[Attached file: {}]", name),
+            });
+        }
+
+        if let Some(photos) = msg.photo() {
+            if let Some(photo) = photos.last() {
+                let file = bot.get_file(photo.file.id.clone()).await?;
+                let mut bytes = Vec::new();
+                bot.download_file(&file.path, &mut bytes).await?;
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                let uri = format!("data:image/jpeg;base64,{}", b64);
+                parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: uri,
+                        detail: Some("high".to_string()),
+                    },
+                });
+            }
+        }
+
+        if parts.is_empty() {
+            return Ok(None);
+        }
+        if parts.len() == 1 {
+            if let ContentPart::Text { text } = &parts[0] {
+                return Ok(Some(ChatMessageContent::Text(text.clone())));
+            }
+        }
+        Ok(Some(ChatMessageContent::Parts(parts)))
     }
 
     async fn handle_callback(
@@ -668,7 +1020,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         let Some(data) = q.data.as_deref() else {
             return Ok(());
         };
-        let Some(message) = q.message else {
+        let Some(ref message) = q.message else {
             return Ok(());
         };
         let tg_chat_id = message.chat().id.0;
@@ -690,10 +1042,14 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         }
 
         let mut handled = false;
+        let mut delete_callback_message = true;
         match data {
             "approve" => {
                 handled = true;
-                if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
+                if self.sessions.has_pending_subagent(tg_chat_id) {
+                    self.approve_pending_subagent(&bot, message.chat().id, tg_chat_id)
+                        .await?;
+                } else if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     if ctx.pending_approvals.is_empty() {
                         bot.send_message(message.chat().id, "No pending approvals.")
                             .await?;
@@ -705,12 +1061,12 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                                 send_response_text(&bot, message.chat().id, &text).await?;
                             }
                             Ok(AgentResponse::ApprovalRequired { pending }) => {
-                                let names: Vec<&str> =
-                                    pending.iter().map(|p| p.tool_name.as_str()).collect();
+                                let details = format_pending_approvals(&pending);
                                 bot.send_message(
                                     message.chat().id,
-                                    format!("Further approval required for: {}", names.join(", ")),
+                                    format!("Further approval required for:\n{}", details),
                                 )
+                                .parse_mode(ParseMode::Html)
                                 .await?;
                             }
                             Err(e) => {
@@ -726,7 +1082,11 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             }
             "deny" => {
                 handled = true;
-                if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
+                if self.sessions.has_pending_subagent(tg_chat_id) {
+                    let _ = self.sessions.take_pending_subagent(tg_chat_id);
+                    bot.send_message(message.chat().id, "Subagent creation denied.")
+                        .await?;
+                } else if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     let pending = std::mem::take(&mut ctx.pending_approvals);
                     self.sessions.set(tg_chat_id, ctx);
                     if pending.is_empty() {
@@ -743,13 +1103,307 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                     }
                 }
             }
+            "subagents:active" => {
+                handled = true;
+                delete_callback_message = false;
+                self.edit_subagents_menu(
+                    &bot,
+                    message.chat().id,
+                    message.id(),
+                    SubagentMenuView::Active,
+                )
+                .await?;
+            }
+            "subagents:recent" => {
+                handled = true;
+                delete_callback_message = false;
+                self.edit_subagents_menu(
+                    &bot,
+                    message.chat().id,
+                    message.id(),
+                    SubagentMenuView::Recent,
+                )
+                .await?;
+            }
+            d if d.starts_with("subagent:show:") => {
+                handled = true;
+                delete_callback_message = false;
+                let id = d.trim_start_matches("subagent:show:");
+                self.edit_subagent_detail(&bot, message.chat().id, message.id(), id)
+                    .await?;
+            }
+            d if d.starts_with("subagent:stop:") => {
+                handled = true;
+                delete_callback_message = false;
+                let id = d.trim_start_matches("subagent:stop:");
+                match self.subagents.stop_subagent(id).await {
+                    Ok(()) => {
+                        self.edit_subagent_detail(&bot, message.chat().id, message.id(), id)
+                            .await?;
+                    }
+                    Err(e) => {
+                        bot.send_message(
+                            message.chat().id,
+                            format!("Failed to stop subagent {}: {}", id, e),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "subagents:back_active" => {
+                handled = true;
+                delete_callback_message = false;
+                self.edit_subagents_menu(
+                    &bot,
+                    message.chat().id,
+                    message.id(),
+                    SubagentMenuView::Active,
+                )
+                .await?;
+            }
+            "subagents:back_recent" => {
+                handled = true;
+                delete_callback_message = false;
+                self.edit_subagents_menu(
+                    &bot,
+                    message.chat().id,
+                    message.id(),
+                    SubagentMenuView::Recent,
+                )
+                .await?;
+            }
             _ => {}
         }
 
         if handled {
+            if delete_callback_message {
+                if let Some(msg_ref) = q.message.as_ref() {
+                    let _ = bot.delete_message(msg_ref.chat().id, msg_ref.id()).await;
+                }
+            }
             let _ = bot.answer_callback_query(q.id).await;
         }
         Ok(())
+    }
+
+    async fn send_subagents_menu(
+        &self,
+        bot: &Bot,
+        chat: teloxide::types::ChatId,
+        view: SubagentMenuView,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (text, keyboard) = self.render_subagents_menu(view).await;
+        bot.send_message(chat, text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboard)
+            .await?;
+        Ok(())
+    }
+
+    async fn edit_subagents_menu(
+        &self,
+        bot: &Bot,
+        chat: teloxide::types::ChatId,
+        message_id: teloxide::types::MessageId,
+        view: SubagentMenuView,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (text, keyboard) = self.render_subagents_menu(view).await;
+        let _ = bot
+            .edit_message_text(chat, message_id, text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboard)
+            .await;
+        Ok(())
+    }
+
+    async fn render_subagents_menu(
+        &self,
+        view: SubagentMenuView,
+    ) -> (String, InlineKeyboardMarkup) {
+        let cfg = &self.config.agent;
+        let rows = self
+            .load_subagents()
+            .await
+            .into_iter()
+            .filter(|s| s.depth == 1)
+            .collect::<Vec<_>>();
+        let mut active = Vec::new();
+        let mut recent = Vec::new();
+        for s in rows {
+            match s.status.as_str() {
+                "pending" | "running" => active.push(s),
+                _ => recent.push(s),
+            }
+        }
+        let selected = match view {
+            SubagentMenuView::Active => &active,
+            SubagentMenuView::Recent => &recent,
+        };
+        let title = match view {
+            SubagentMenuView::Active => "<b>Subagents — Active</b>",
+            SubagentMenuView::Recent => "<b>Subagents — Recent</b>",
+        };
+        let mut text = format!(
+            "{}\nDepth: <code>{}</code>\nConcurrent: <code>{}</code>\nToken budget: <code>{}</code>\nChild limit: <code>{}</code>\n",
+            title, cfg.max_subagent_depth, cfg.max_concurrent_subagents, cfg.subagent_token_budget
+            , cfg.max_child_subagents_per_parent
+        );
+        if selected.is_empty() {
+            text.push_str("\nNo subagents in this view.");
+        } else {
+            text.push_str("\nSelect a parent subagent:");
+            for s in selected.iter().take(12) {
+                text.push_str(&format!("\n• {}", format_subagent_row_html(s)));
+            }
+        }
+
+        let mut rows_buttons = vec![vec![
+            InlineKeyboardButton::callback("Active", "subagents:active"),
+            InlineKeyboardButton::callback("Recent", "subagents:recent"),
+        ]];
+        for s in selected.iter().take(10) {
+            let short_id = s.id.chars().take(8).collect::<String>();
+            let label = format!("{} [{}]", short_id, s.status);
+            rows_buttons.push(vec![InlineKeyboardButton::callback(
+                label,
+                format!("subagent:show:{}", s.id),
+            )]);
+        }
+        (text, InlineKeyboardMarkup::new(rows_buttons))
+    }
+
+    async fn edit_subagent_detail(
+        &self,
+        bot: &Bot,
+        chat: teloxide::types::ChatId,
+        message_id: teloxide::types::MessageId,
+        subagent_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let detail = self.load_subagent_detail(subagent_id).await;
+        let (text, back_view) = if let Some(d) = detail {
+            let tail = read_subagent_log_tail(subagent_id, 10);
+            let descendants = self.load_descendant_subagents(subagent_id).await;
+            let hb_view = heartbeat_status_view(subagent_id, d.updated_at.as_deref());
+            let current = if d.status == "running" || d.status == "pending" {
+                latest_subagent_progress(subagent_id)
+                    .map(|p| format!("Current work: {}", p))
+                    .unwrap_or_else(|| "Current work: task is in progress.".to_string())
+            } else if d.status == "completed" {
+                "Current work: completed.".to_string()
+            } else {
+                "Current work: stopped with failure/cancel state.".to_string()
+            };
+            let child_lines = if descendants.is_empty() {
+                "No child subagents.".to_string()
+            } else {
+                descendants
+                    .into_iter()
+                    .map(|s| format!("• {}", format_subagent_row_html(&s)))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let body = format!(
+                "<b>Subagent</b> <code>{}</code>\nStatus: <code>{}</code>\nDepth: <code>{}</code>\nModel: <code>{}</code>\nUpdated: <code>{}</code>\nHeartbeat: <code>{}</code>\nTask: {}\n{}\n\n<b>Child subagents</b>\n{}\n\n<b>Recent actions</b>\n<pre>{}</pre>",
+                escape_html(&d.id),
+                escape_html(&d.status),
+                d.depth,
+                escape_html(&d.model.unwrap_or_else(|| "default".to_string())),
+                escape_html(&d.updated_at.unwrap_or_else(|| "-".to_string())),
+                escape_html(&hb_view),
+                escape_html(&d.goal.unwrap_or_else(|| "-".to_string())),
+                escape_html(&current),
+                child_lines,
+                escape_html(if tail.is_empty() { "No log entries yet." } else { &tail })
+            );
+            let back = if d.status == "running" || d.status == "pending" {
+                SubagentMenuView::Active
+            } else {
+                SubagentMenuView::Recent
+            };
+            (body, back)
+        } else {
+            (
+                format!("Subagent {} not found.", subagent_id),
+                SubagentMenuView::Active,
+            )
+        };
+        let back_cb = match back_view {
+            SubagentMenuView::Active => "subagents:back_active",
+            SubagentMenuView::Recent => "subagents:back_recent",
+        };
+        let mut controls = vec![InlineKeyboardButton::callback("Back", back_cb)];
+        if let Some(d) = self.load_subagent_detail(subagent_id).await {
+            if d.status == "running" || d.status == "pending" {
+                controls.push(InlineKeyboardButton::callback(
+                    "Stop",
+                    format!("subagent:stop:{}", subagent_id),
+                ));
+            }
+        }
+        let keyboard = InlineKeyboardMarkup::new(vec![controls]);
+        let _ = bot
+            .edit_message_text(chat, message_id, text)
+            .parse_mode(ParseMode::Html)
+            .reply_markup(keyboard)
+            .await;
+        Ok(())
+    }
+
+    async fn load_subagent_detail(&self, subagent_id: &str) -> Option<SubagentDetailRow> {
+        let sql = format!(
+            "SELECT id, status, depth, goal, model, updated_at \
+             FROM subagents WHERE id='{}' LIMIT 1",
+            escape_sql(subagent_id)
+        );
+        let stmt = Statement::from_string(
+            match self.db.db_type() {
+                DbType::Postgres => DatabaseBackend::Postgres,
+                DbType::Sqlite => DatabaseBackend::Sqlite,
+            },
+            sql,
+        );
+        let row = self.db.conn().query_one(stmt).await.ok().flatten()?;
+        Some(SubagentDetailRow {
+            id: row.try_get("", "id").ok()?,
+            status: row.try_get("", "status").ok()?,
+            depth: row.try_get("", "depth").unwrap_or_default(),
+            goal: row.try_get("", "goal").ok(),
+            model: row.try_get("", "model").ok(),
+            updated_at: row.try_get("", "updated_at").ok(),
+        })
+    }
+
+    async fn load_descendant_subagents(&self, root_id: &str) -> Vec<SubagentStatusRow> {
+        let sql = format!(
+            "SELECT id, status, depth, goal, model, updated_at, parent_agent_id \
+             FROM subagents WHERE parent_agent_id='{}' ORDER BY updated_at DESC LIMIT 20",
+            escape_sql(root_id)
+        );
+        let stmt = Statement::from_string(
+            match self.db.db_type() {
+                DbType::Postgres => DatabaseBackend::Postgres,
+                DbType::Sqlite => DatabaseBackend::Sqlite,
+            },
+            sql,
+        );
+        match self.db.conn().query_all(stmt).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|r| SubagentStatusRow {
+                    id: r
+                        .try_get("", "id")
+                        .unwrap_or_else(|_| "unknown".to_string()),
+                    status: r
+                        .try_get("", "status")
+                        .unwrap_or_else(|_| "unknown".to_string()),
+                    depth: r.try_get("", "depth").unwrap_or_default(),
+                    goal: r.try_get("", "goal").ok(),
+                    model: r.try_get("", "model").ok(),
+                    updated_at: r.try_get("", "updated_at").ok(),
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     async fn generate_boot_start_message(&self, tg_user_id: i64) -> String {
@@ -765,24 +1419,249 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             self.provider_registry.default_model(),
             self.runtime.config().system_prompt.clone(),
         );
-        let prompt = "Generate a warm, friendly first-time welcome message (3-5 sentences). \
-Introduce yourself as Unly, mention this is a one-time personalisation setup, \
-and invite the user to share: their name or preferred address, communication style (concise/detailed, formal/casual), \
-and key areas they want help with. \
-End with exactly: 'When you are done, just type done.' \
+        let prompt = "Generate a short and neutral first-time setup message (2-3 short sentences). \
+Do not be overly friendly. \
+Ask the user to specify how you should communicate (tone, brevity/detail, language) and what tasks to prioritize. \
+End with wording similar to: Let me know when you are finished. \
 Return plain text only, no markdown formatting.";
         match self.runtime.process(&mut ctx, prompt).await {
             Ok(AgentResponse::Text(t)) if !t.trim().is_empty() => t,
-            _ => "Hi! I'm Unly, your personal AI agent.\n\n\
-Since this is our first conversation, I'd love to get to know you a little so I can serve you better.\n\n\
-Could you tell me:\n\
-• Your name or how you'd like me to address you\n\
-• Your preferred communication style (brief and direct, or detailed explanations)\n\
-• What you mainly want to use me for\n\n\
-When you are done, just type done."
+            _ => "Initial setup.\nTell me how I should communicate (tone, brevity/detail, language) and what tasks to prioritize.\nLet me know when you're finished."
                 .to_string(),
         }
     }
+
+    async fn should_finalize_boot(&self, tg_user_id: i64, user_text: &str) -> bool {
+        let permissions = build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
+        let mut ctx = AgentContext::new(
+            ChatId::new(),
+            None,
+            permissions,
+            self.provider_registry
+                .default_provider()
+                .map(|p| p.name().to_string())
+                .unwrap_or_else(|_| "copilot".to_string()),
+            self.provider_registry.default_model(),
+            self.runtime.config().system_prompt.clone(),
+        );
+        let prompt = format!(
+            "Classify whether the user is explicitly asking to finish or exit BOOT configuration now.\n\
+Return exactly one token: YES or NO.\n\
+User message:\n{}",
+            user_text
+        );
+        match self.runtime.process(&mut ctx, prompt).await {
+            Ok(AgentResponse::Text(t)) => t.trim().eq_ignore_ascii_case("YES"),
+            _ => false,
+        }
+    }
+
+    async fn generate_boot_done_message(&self, tg_user_id: i64) -> String {
+        let permissions = build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
+        let mut ctx = AgentContext::new(
+            ChatId::new(),
+            None,
+            permissions,
+            self.provider_registry
+                .default_provider()
+                .map(|p| p.name().to_string())
+                .unwrap_or_else(|_| "copilot".to_string()),
+            self.provider_registry.default_model(),
+            self.runtime.config().system_prompt.clone(),
+        );
+        let prompt = "Generate a short confirmation message (1-2 sentences) that onboarding configuration is complete and you are ready for work. \
+Do not mention files, BOOT.md, memory processing, or technical internals. \
+Tone: confident, concise, friendly. Plain text only.";
+        match self.runtime.process(&mut ctx, prompt).await {
+            Ok(AgentResponse::Text(t)) if !t.trim().is_empty() => t,
+            _ => "Configuration is complete. I'm ready to work.".to_string(),
+        }
+    }
+
+    async fn build_boot_profile_update(&self, tg_user_id: i64) -> Option<String> {
+        let boot_raw = std::fs::read_to_string(workspace::boot_path()).ok()?;
+        if boot_raw.trim().is_empty() {
+            return None;
+        }
+        let permissions = build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
+        let mut ctx = AgentContext::new(
+            ChatId::new(),
+            None,
+            permissions,
+            self.provider_registry
+                .default_provider()
+                .map(|p| p.name().to_string())
+                .unwrap_or_else(|_| "copilot".to_string()),
+            self.provider_registry.default_model(),
+            self.runtime.config().system_prompt.clone(),
+        );
+        let prompt = format!(
+            "You are processing first-run onboarding notes.\n\
+Read the BOOT transcript and extract durable user preferences for long-term behavior.\n\
+Return only concise markdown bullet points suitable for a `## User Preferences` section.\n\
+No intro text, no code blocks, no technical details.\n\n\
+BOOT transcript:\n{}",
+            boot_raw
+        );
+        match self.runtime.process(&mut ctx, prompt).await {
+            Ok(AgentResponse::Text(t)) if !t.trim().is_empty() => Some(t),
+            _ => None,
+        }
+    }
+
+    async fn approve_pending_subagent(
+        &self,
+        bot: &Bot,
+        chat: teloxide::types::ChatId,
+        tg_chat_id: i64,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pending = match self.sessions.take_pending_subagent(tg_chat_id) {
+            Some(p) => p,
+            None => {
+                bot.send_message(chat, "No pending subagent creation.")
+                    .await?;
+                return Ok(());
+            }
+        };
+        let ctx = match self.sessions.get(tg_chat_id) {
+            Some(c) => c,
+            None => {
+                let chat_id = ChatId::new();
+                let new_ctx = AgentContext::new(
+                    chat_id,
+                    None,
+                    unly_core::permissions::PermissionSet::admin(),
+                    self.provider_registry
+                        .default_provider()
+                        .map(|p| p.name().to_string())
+                        .unwrap_or_else(|_| "copilot".to_string()),
+                    self.provider_registry.default_model(),
+                    self.runtime.config().system_prompt.clone(),
+                );
+                self.sessions.set(tg_chat_id, new_ctx.clone());
+                new_ctx
+            }
+        };
+
+        let request = SubagentRequest {
+            goal: pending.goal.clone(),
+            parent_agent_id: pending.parent_agent_id,
+            depth: pending.depth,
+            permissions: unly_core::permissions::PermissionSet::admin(),
+            provider: Some(pending.provider),
+            model: Some(pending.model),
+            token_budget: self.config.agent.subagent_token_budget,
+        };
+
+        match self
+            .subagents
+            .spawn_background(request, self.runtime.clone(), ctx.chat_id)
+            .await
+        {
+            Ok(handle) => {
+                bot.send_message(
+                    chat,
+                    format!(
+                        "Subagent spawned with task: {}",
+                        shorten_goal(&pending.goal)
+                    ),
+                )
+                .await?;
+                let bot_clone = bot.clone();
+                let subagents = self.subagents.clone();
+                let id = handle.id.to_string();
+                tokio::spawn(async move {
+                    wait_and_notify_subagent_result(&bot_clone, &subagents, chat, id).await;
+                });
+            }
+            Err(e) => {
+                bot.send_message(chat, format!("Failed to spawn subagent: {}", e))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+async fn classify_subagent_spawn_request(
+    runtime: Arc<AgentRuntime>,
+    mut ctx: AgentContext,
+    user_text: &str,
+) -> Option<String> {
+    if !ctx.permissions.has(&Permission::UseSubagents) {
+        return None;
+    }
+    let prompt = format!(
+        "Determine if this message is a request to create/spawn a subagent.\n\
+Return JSON only: {{\"spawn\": true|false, \"goal\": \"...\"}}.\n\
+If spawn=false, goal must be empty.\n\
+Message:\n{}",
+        user_text
+    );
+    let resp = runtime.process(&mut ctx, prompt).await.ok()?;
+    let AgentResponse::Text(text) = resp else {
+        return None;
+    };
+    let parsed: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    if !parsed.get("spawn")?.as_bool()? {
+        return None;
+    }
+    let goal = parsed.get("goal")?.as_str()?.trim();
+    if goal.is_empty() {
+        None
+    } else {
+        Some(goal.to_string())
+    }
+}
+
+fn is_affirmative_approval(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    matches!(
+        t.as_str(),
+        "yes"
+            | "ye"
+            | "y"
+            | "ok"
+            | "okay"
+            | "sure"
+            | "confirm"
+            | "approve"
+            | "да"
+            | "ок"
+            | "ага"
+            | "подтверждаю"
+    )
+}
+
+fn is_negative_approval(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    matches!(
+        t.as_str(),
+        "no" | "n" | "deny" | "not now" | "cancel" | "нет" | "не" | "отмена"
+    )
+}
+
+fn format_pending_approvals(pending: &[unly_agent::context::PendingApproval]) -> String {
+    pending
+        .iter()
+        .map(|p| {
+            if (p.tool_name == "bash" || p.tool_name == "shell")
+                && p.args.get("command").and_then(|v| v.as_str()).is_some()
+            {
+                let cmd = p.args["command"].as_str().unwrap_or_default();
+                format!("- {}: <code>{}</code>", p.tool_name, escape_html(cmd))
+            } else {
+                format!("- {}", escape_html(&p.tool_name))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -880,6 +1759,32 @@ fn convert_to_telegram_html(text: &str) -> String {
             out.push_str("&lt;");
             i += 1;
             continue;
+        }
+
+        // ── Markdown headers #/##/### (Telegram has no h1-h6) ────────────────
+        if (i == 0 || chars[i - 1] == '\n') && chars[i] == '#' {
+            let mut j = i;
+            while j < n && chars[j] == '#' {
+                j += 1;
+            }
+            let level = j - i;
+            if (1..=3).contains(&level) && j < n && chars[j] == ' ' {
+                let text_start = j + 1;
+                let text_end = chars[text_start..]
+                    .iter()
+                    .position(|&c| c == '\n')
+                    .map(|p| text_start + p)
+                    .unwrap_or(n);
+                let header_text: String = chars[text_start..text_end].iter().collect();
+                out.push_str("<b>");
+                push_html_escaped(&mut out, header_text.trim());
+                out.push_str("</b>\n\n");
+                i = text_end;
+                if i < n && chars[i] == '\n' {
+                    i += 1;
+                }
+                continue;
+            }
         }
 
         // ── Bold **…** ────────────────────────────────────────────────────────
@@ -1181,7 +2086,159 @@ struct SubagentStatusRow {
     id: String,
     status: String,
     depth: i32,
+    goal: Option<String>,
     model: Option<String>,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SubagentMenuView {
+    Active,
+    Recent,
+}
+
+#[derive(Debug, Clone)]
+struct SubagentDetailRow {
+    id: String,
+    status: String,
+    depth: i32,
+    goal: Option<String>,
+    model: Option<String>,
+    updated_at: Option<String>,
+}
+
+fn format_subagent_row_html(s: &SubagentStatusRow) -> String {
+    let model = s.model.as_deref().unwrap_or("default");
+    let freshness = s
+        .updated_at
+        .as_deref()
+        .map(heartbeat_freshness)
+        .unwrap_or("unknown".to_string());
+    let goal = s
+        .goal
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .take(12)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let updated = s
+        .updated_at
+        .as_deref()
+        .map(short_ts)
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "<code>{}</code> [{}] d={} model={} at={} hb={} {}",
+        escape_html(&s.id),
+        escape_html(&s.status),
+        s.depth,
+        escape_html(model),
+        escape_html(&updated),
+        escape_html(&freshness),
+        if goal.is_empty() {
+            "".to_string()
+        } else {
+            format!("task: {}", escape_html(&goal))
+        }
+    )
+}
+
+fn read_subagent_log_tail(subagent_id: &str, lines: usize) -> String {
+    let path = unly_config::workspace::subagent_logs_dir().join(format!("{}.log", subagent_id));
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let mut collected = content
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(lines)
+        .collect::<Vec<_>>();
+    collected.reverse();
+    collected.join("\n")
+}
+
+fn latest_subagent_progress(subagent_id: &str) -> Option<String> {
+    let path = unly_config::workspace::subagent_logs_dir().join(format!("{}.log", subagent_id));
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    let blocks: Vec<&str> = content.split("\n\n").collect();
+    for block in blocks.into_iter().rev() {
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("progress=") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+        if !block.contains("status=progress") {
+            continue;
+        }
+        for line in block.lines() {
+            if let Some(value) = line.strip_prefix("result=") {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn heartbeat_status_view(subagent_id: &str, updated_at: Option<&str>) -> String {
+    let freshness = updated_at
+        .map(heartbeat_freshness)
+        .unwrap_or_else(|| "unknown".to_string());
+    let path = unly_config::workspace::subagent_logs_dir().join(format!("{}.log", subagent_id));
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return format!("{} (no logs)", freshness);
+    };
+    let mut total_hb = 0u64;
+    let mut with_progress = 0u64;
+    for line in content.lines() {
+        if line.contains("status=heartbeat") {
+            total_hb += 1;
+        }
+        if line.starts_with("result=") && line.contains("elapsed=") && line.contains("tick=") {
+            with_progress += 1;
+        }
+    }
+    if total_hb == 0 {
+        return format!("{} (no heartbeat entries)", freshness);
+    }
+    if with_progress == 0 {
+        return format!("{} (heartbeat-only, no progress snapshot)", freshness);
+    }
+    format!(
+        "{} (progress snapshots: {}/{})",
+        freshness, with_progress, total_hb
+    )
+}
+
+fn escape_sql(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+fn short_ts(ts: &str) -> String {
+    ts.get(0..19).unwrap_or(ts).replace('T', " ")
+}
+
+fn heartbeat_freshness(updated_at: &str) -> String {
+    let Ok(ts) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return "unknown".to_string();
+    };
+    let age = chrono::Utc::now().signed_duration_since(ts.with_timezone(&chrono::Utc));
+    let secs = age.num_seconds();
+    if secs <= 30 {
+        "alive".to_string()
+    } else if secs <= 90 {
+        "slow".to_string()
+    } else {
+        "stale".to_string()
+    }
 }
 
 async fn send_response_text(
@@ -1207,11 +2264,6 @@ async fn send_response_text(
     Ok(())
 }
 
-fn is_boot_done_signal(text: &str) -> bool {
-    let normalized = text.trim().to_lowercase();
-    BOOT_DONE_PHRASES.iter().any(|p| normalized == *p)
-}
-
 fn build_boot_summary() -> String {
     let boot_path = workspace::boot_path();
     let raw = std::fs::read_to_string(boot_path).unwrap_or_default();
@@ -1230,6 +2282,86 @@ fn build_boot_summary() -> String {
         lines.extend(extracted);
     }
     lines.join("\n")
+}
+
+fn user_input_for_storage(input: &ChatMessageContent) -> String {
+    match input {
+        ChatMessageContent::Text(text) => text.clone(),
+        ChatMessageContent::Parts(parts) => {
+            let mut out = Vec::new();
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } => out.push(text.clone()),
+                    ContentPart::ImageUrl { .. } => out.push("[image attached]".to_string()),
+                }
+            }
+            out.join("\n")
+        }
+    }
+}
+
+fn parse_spawn_subagent_request(text: &str) -> Option<String> {
+    let prefix = "/spawn_subagent";
+    if !text.starts_with(prefix) {
+        return None;
+    }
+    let goal = text[prefix.len()..].trim();
+    if goal.is_empty() {
+        None
+    } else {
+        Some(goal.to_string())
+    }
+}
+
+fn shorten_goal(goal: &str) -> String {
+    let max = 120usize;
+    if goal.chars().count() <= max {
+        return goal.to_string();
+    }
+    goal.chars().take(max).collect::<String>() + "…"
+}
+
+async fn wait_and_notify_subagent_result(
+    bot: &Bot,
+    manager: &SubagentManager,
+    chat_id: teloxide::types::ChatId,
+    subagent_id: String,
+) {
+    for _ in 0..180u32 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let status = manager.subagent_status(&subagent_id).await;
+        match status {
+            Some(s) if s == "completed" => {
+                let _ = bot
+                    .send_message(chat_id, format!("Subagent {} completed.", subagent_id))
+                    .await;
+                return;
+            }
+            Some(s) if s == "failed" => {
+                let _ = bot
+                    .send_message(chat_id, format!("Subagent {} failed.", subagent_id))
+                    .await;
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn resolve_telegram_chat_id(db: &Database, chat_id: ChatId) -> Option<i64> {
+    let sql = format!(
+        "SELECT telegram_chat_id FROM chats WHERE id='{}' LIMIT 1",
+        chat_id
+    );
+    let stmt = Statement::from_string(
+        match db.db_type() {
+            DbType::Postgres => DatabaseBackend::Postgres,
+            DbType::Sqlite => DatabaseBackend::Sqlite,
+        },
+        sql,
+    );
+    let row = db.conn().query_one(stmt).await.ok().flatten()?;
+    row.try_get("", "telegram_chat_id").ok()
 }
 
 async fn send_message_formatted(
@@ -1403,5 +2535,12 @@ mod tests {
             let closes = chunk.matches("</b>").count();
             assert_eq!(opens, closes, "unbalanced <b> in chunk: {}", chunk);
         }
+    }
+
+    #[test]
+    fn test_convert_markdown_header_h3_to_bold_with_spacing() {
+        let input = "### Setup\nDo this";
+        let html = convert_to_telegram_html(input);
+        assert_eq!(html, "<b>Setup</b>\n\nDo this");
     }
 }

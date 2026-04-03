@@ -13,8 +13,6 @@ pub enum Command {
     Model(String),
     #[command(description = "Set the active provider. Usage: /provider <name>")]
     Provider(String),
-    #[command(description = "Show subagent capabilities and limits.")]
-    Subagent,
     #[command(description = "Show active subagents and statuses.")]
     Subagents,
     #[command(description = "Approve a pending tool action.")]
