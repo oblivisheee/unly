@@ -9,12 +9,12 @@ use tracing::info;
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config, workspace};
 use unly_db::Database;
-use unly_plugins::SkillLoader;
+use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::copilot::{CopilotProvider, DevicePollResult};
 use unly_telegram::{SessionStore, TelegramBot};
 
 use crate::{
-    logging::init_logging,
+    logging::{init_logging, init_logging_with_file},
     service::{build_providers, build_runtime, build_tools, build_tools_with_scheduler},
     update as self_update,
 };
@@ -168,7 +168,11 @@ impl Cli {
                 let config = load_config(&config_path)
                     .with_context(|| format!("loading config from {}", config_path.display()))?;
 
-                init_logging(&config.logging.level, config.logging.json);
+                init_logging_with_file(
+                    &config.logging.level,
+                    config.logging.json,
+                    config.logging.file.as_deref(),
+                );
                 info!(
                     "starting unly agent platform v{}",
                     env!("CARGO_PKG_VERSION")
@@ -401,26 +405,53 @@ impl Cli {
                 PluginCommands::List => {
                     let config = load_config(&config_path).unwrap_or_else(|_| default_config());
                     let skills_dir = &config.plugins.skills_dir;
+                    let plugins_dir = &config.plugins.plugins_dir;
                     let skills = SkillLoader::load_from_dir(skills_dir);
-                    if skills.is_empty() {
-                        println!("No skills installed.");
+                    let plugins = PluginLoader::load_from_dir(plugins_dir);
+
+                    if skills.is_empty() && plugins.is_empty() {
+                        println!("No skills or plugins installed.");
                         println!(
-                            "\nInstall a skill with:  unly plugin install <path-to-skill-dir>"
+                            "\nInstall a skill with:   unly plugin install <path-to-skill-dir>"
                         );
                     } else {
-                        println!(
-                            "{:<30} {:<10} Description",
-                            "Name", "Status"
-                        );
-                        println!("{}", "-".repeat(80));
-                        for s in &skills {
-                            let status = if s.enabled { "enabled" } else { "disabled" };
+                        if !skills.is_empty() {
+                            println!("Skills ({})", skills_dir.display());
                             println!(
-                                "{:<30} {:<10} {}",
-                                s.meta.name, status, s.meta.description
+                                "{:<30} {:<10} Description",
+                                "Name", "Status"
                             );
+                            println!("{}", "-".repeat(80));
+                            for s in &skills {
+                                let status = if s.enabled { "enabled" } else { "disabled" };
+                                println!(
+                                    "{:<30} {:<10} {}",
+                                    s.meta.name, status, s.meta.description
+                                );
+                            }
+                        } else {
+                            println!("Skills: none installed.");
                         }
-                        println!("\nSkills directory: {}", skills_dir.display());
+
+                        println!();
+
+                        if !plugins.is_empty() {
+                            println!("Plugins ({})", plugins_dir.display());
+                            println!(
+                                "{:<30} {:<10} Description",
+                                "Name", "Status"
+                            );
+                            println!("{}", "-".repeat(80));
+                            for p in &plugins {
+                                let status = if p.enabled { "enabled" } else { "disabled" };
+                                println!(
+                                    "{:<30} {:<10} {}",
+                                    p.meta.name, status, p.meta.description
+                                );
+                            }
+                        } else {
+                            println!("Plugins: none installed.");
+                        }
                     }
                     Ok(())
                 }

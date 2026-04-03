@@ -9,7 +9,7 @@ use teloxide::{
     utils::command::BotCommands,
 };
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use unly_agent::{
     AgentContext, AgentResponse, AgentRuntime, StreamEvent, SubagentManager, SubagentRequest,
@@ -248,6 +248,11 @@ impl TelegramBot {
 
         match cmd {
             Command::Start => {
+                info!(
+                    user = tg_user_id,
+                    chat_id = tg_chat_id,
+                    "session started"
+                );
                 self.sessions.remove(tg_chat_id);
                 if workspace::is_boot_mode() {
                     let boot_start = self.generate_boot_start_message(tg_user_id).await;
@@ -259,6 +264,11 @@ impl TelegramBot {
                 }
             }
             Command::Reset => {
+                info!(
+                    user = tg_user_id,
+                    chat_id = tg_chat_id,
+                    "session reset"
+                );
                 self.sessions.remove(tg_chat_id);
                 bot.send_message(msg.chat.id, "Session reset. Send your next request.")
                     .await?;
@@ -295,6 +305,12 @@ impl TelegramBot {
             }
 
             Command::Model(model_id) => {
+                info!(
+                    user = tg_user_id,
+                    chat_id = tg_chat_id,
+                    model = %model_id,
+                    "user changed active model"
+                );
                 if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     ctx.model = model_id.clone();
                     self.sessions.set(tg_chat_id, ctx);
@@ -311,6 +327,12 @@ impl TelegramBot {
 
             Command::Provider(provider_name) => {
                 if self.provider_registry.get(&provider_name).is_some() {
+                    info!(
+                        user = tg_user_id,
+                        chat_id = tg_chat_id,
+                        provider = %provider_name,
+                        "user changed active provider"
+                    );
                     if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                         ctx.provider = provider_name.clone();
                         self.sessions.set(tg_chat_id, ctx);
@@ -319,6 +341,13 @@ impl TelegramBot {
                         .await?;
                 } else {
                     let available = self.provider_registry.provider_names().join(", ");
+                    warn!(
+                        user = tg_user_id,
+                        chat_id = tg_chat_id,
+                        provider = %provider_name,
+                        available = %available,
+                        "user requested unknown provider"
+                    );
                     bot.send_message(
                         msg.chat.id,
                         format!(
@@ -389,6 +418,11 @@ impl TelegramBot {
 
             Command::Deny => {
                 if self.sessions.has_pending_subagent(tg_chat_id) {
+                    info!(
+                        user = tg_user_id,
+                        chat_id = tg_chat_id,
+                        "user denied pending subagent spawn"
+                    );
                     let _ = self.sessions.take_pending_subagent(tg_chat_id);
                     bot.send_message(msg.chat.id, "Subagent creation denied.")
                         .await?;
@@ -403,6 +437,12 @@ impl TelegramBot {
                     } else {
                         let names: Vec<&str> =
                             pending.iter().map(|p| p.tool_name.as_str()).collect();
+                        info!(
+                            user = tg_user_id,
+                            chat_id = tg_chat_id,
+                            tools = ?names,
+                            "user denied tool executions"
+                        );
                         self.audit.denied(
                             "tool_approval",
                             tg_user_id.to_string(),
@@ -422,6 +462,17 @@ impl TelegramBot {
             }
             Command::Approval(mode) => match mode.trim().to_lowercase().as_str() {
                 "auto" => {
+                    info!(
+                        user = tg_user_id,
+                        chat_id = tg_chat_id,
+                        mode = "auto",
+                        "approval mode changed"
+                    );
+                    self.audit.success(
+                        "approval_mode",
+                        tg_user_id.to_string(),
+                        "set mode=auto",
+                    );
                     self.sessions.set_auto_approve(tg_chat_id, true);
                     bot.send_message(
                         msg.chat.id,
@@ -430,6 +481,17 @@ impl TelegramBot {
                     .await?;
                 }
                 "manual" => {
+                    info!(
+                        user = tg_user_id,
+                        chat_id = tg_chat_id,
+                        mode = "manual",
+                        "approval mode changed"
+                    );
+                    self.audit.success(
+                        "approval_mode",
+                        tg_user_id.to_string(),
+                        "set mode=manual",
+                    );
                     self.sessions.set_auto_approve(tg_chat_id, false);
                     bot.send_message(
                         msg.chat.id,
@@ -437,7 +499,13 @@ impl TelegramBot {
                     )
                     .await?;
                 }
-                _ => {
+                other => {
+                    warn!(
+                        user = tg_user_id,
+                        chat_id = tg_chat_id,
+                        invalid_mode = other,
+                        "invalid approval mode requested"
+                    );
                     bot.send_message(
                         msg.chat.id,
                         "Invalid approval mode. Use: /approval manual or /approval auto",
@@ -469,6 +537,11 @@ impl TelegramBot {
             &self.config.telegram.allowed_user_ids,
             self.config.telegram.open_access,
         ) {
+            warn!(
+                user = tg_user_id,
+                chat_id = tg_chat_id,
+                "unauthorized message blocked"
+            );
             bot.send_message(msg.chat.id, " You are not authorized to use this bot.")
                 .await?;
             return Ok(());

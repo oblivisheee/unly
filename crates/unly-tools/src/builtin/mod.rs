@@ -3,6 +3,7 @@ pub mod git;
 pub mod http;
 pub mod orchestration;
 pub mod shell;
+pub mod skills;
 
 pub use fs::{
     FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool, FsMkdirTool, FsMoveTool, FsReadTool,
@@ -15,3 +16,7 @@ pub use orchestration::{
     SpawnSubagentTool,
 };
 pub use shell::{BashTool, ShellTool};
+pub use skills::{
+    PluginCreateTool, PluginDisableTool, PluginEnableTool, PluginListTool, PluginRemoveTool,
+    SkillCreateTool, SkillDisableTool, SkillEnableTool, SkillListTool, SkillRemoveTool,
+};

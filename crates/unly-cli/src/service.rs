@@ -6,7 +6,7 @@ use unly_audit::AuditLogger;
 use unly_config::{workspace, AppConfig};
 use unly_db::Database;
 use unly_memory::MemoryStore;
-use unly_plugins::SkillLoader;
+use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::{
     copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
 };
@@ -14,7 +14,9 @@ use unly_tools::{
     builtin::{
         create_scheduler, CronJobTool, FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool,
         FsMkdirTool, FsMoveTool, FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool,
-        HttpGetTool, HttpPostTool, SpawnSubagentTool,
+        HttpGetTool, HttpPostTool, PluginCreateTool, PluginDisableTool, PluginEnableTool,
+        PluginListTool, PluginRemoveTool, SkillCreateTool, SkillDisableTool, SkillEnableTool,
+        SkillListTool, SkillRemoveTool, SpawnSubagentTool,
     },
     policy::ExecutionPolicy,
     ToolRegistry,
@@ -36,6 +38,16 @@ fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
         "fs_grep",
         "spawn_subagent",
         "cron_job",
+        "skill_list",
+        "skill_create",
+        "skill_enable",
+        "skill_disable",
+        "skill_remove",
+        "plugin_list",
+        "plugin_create",
+        "plugin_enable",
+        "plugin_disable",
+        "plugin_remove",
     ] {
         if !enabled.iter().any(|t| t == name) {
             enabled.push(name.to_string());
@@ -85,6 +97,11 @@ const SKILLS_SECTION_HEADER: &str =
     "# Skills\n\nThe following skills are available and their instructions should be \
 followed when relevant:\n\n";
 
+/// Header injected before plugin instructions in the system prompt.
+const PLUGINS_SECTION_HEADER: &str =
+    "# Plugins\n\nThe following plugins are installed and their instructions should be \
+followed when relevant:\n\n";
+
 /// Build the tool registry from config.
 pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     let policy = ExecutionPolicy {
@@ -125,6 +142,20 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
         config.tools.require_approval_for_dangerous,
     ));
     registry.register(SpawnSubagentTool);
+
+    // Self-configuration tools (skill/plugin management).
+    let skills_dir = config.plugins.skills_dir.clone();
+    let plugins_dir = config.plugins.plugins_dir.clone();
+    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillRemoveTool { skills_dir: skills_dir.clone() });
+    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginRemoveTool { plugins_dir });
 
     Arc::new(registry)
 }
@@ -173,6 +204,20 @@ pub fn build_tools_with_scheduler(
     registry.register(SpawnSubagentTool);
     let scheduler = create_scheduler(db.clone(), &config.scheduler);
     registry.register(CronJobTool::new(db, scheduler.clone()));
+
+    // Self-configuration tools (skill/plugin management).
+    let skills_dir = config.plugins.skills_dir.clone();
+    let plugins_dir = config.plugins.plugins_dir.clone();
+    registry.register(SkillListTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillCreateTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillEnableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillDisableTool { skills_dir: skills_dir.clone() });
+    registry.register(SkillRemoveTool { skills_dir: skills_dir.clone() });
+    registry.register(PluginListTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginCreateTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginEnableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginDisableTool { plugins_dir: plugins_dir.clone() });
+    registry.register(PluginRemoveTool { plugins_dir });
 
     (Arc::new(registry), scheduler)
 }
@@ -254,6 +299,26 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> S
                     skill.meta.name,
                     skill.meta.description,
                     skill.instructions.trim()
+                ));
+            }
+            section
+        }
+    };
+
+    // Load enabled plugins and build a plugins section for the prompt.
+    let plugins_section = {
+        let plugins = PluginLoader::load_from_dir(&config.plugins.plugins_dir);
+        let active: Vec<_> = plugins.into_iter().filter(|p| p.enabled).collect();
+        if active.is_empty() {
+            String::new()
+        } else {
+            let mut section = PLUGINS_SECTION_HEADER.to_string();
+            for plugin in &active {
+                section.push_str(&format!(
+                    "## {} — {}\n\n{}\n\n",
+                    plugin.meta.name,
+                    plugin.meta.description,
+                    plugin.instructions.trim()
                 ));
             }
             section
@@ -343,6 +408,9 @@ For cron tasks, prefer the native `cron_job` tool. For delegated execution, pref
     }
     if !skills_section.is_empty() {
         sections.push(skills_section.trim());
+    }
+    if !plugins_section.is_empty() {
+        sections.push(plugins_section.trim());
     }
     sections.push(capabilities.trim());
 
