@@ -942,21 +942,46 @@ fn convert_to_telegram_html(text: &str) -> String {
 
         // ── Plain text: escape special HTML chars ─────────────────────────────
         if chars[i] == '&' {
-            // Pass through already-escaped HTML entities by peeking at the next chars.
             let rest = &chars[i..];
-            let is_entity = matches!(
-                rest.get(..6).map(|s| s as &[char]),
-                Some(['&', 'a', 'm', 'p', ';', _] | ['&', 'q', 'u', 'o', 't', ';'])
-            ) || matches!(
-                rest.get(..4).map(|s| s as &[char]),
-                Some(['&', 'l', 't', ';'] | ['&', 'g', 't', ';'])
-            ) || matches!(rest.get(..3).map(|s| s as &[char]), Some(['&', '#', _]));
-            if is_entity {
-                out.push('&');
+
+            let entity_len = if matches!(rest.get(..5), Some(['&', 'a', 'm', 'p', ';'])) {
+                Some(5)
+            } else if matches!(rest.get(..6), Some(['&', 'q', 'u', 'o', 't', ';'])) {
+                Some(6)
+            } else if matches!(rest.get(..4), Some(['&', 'l', 't', ';'] | ['&', 'g', 't', ';'])) {
+                Some(4)
+            } else if rest.len() >= 4 && rest[0] == '&' && rest[1] == '#' {
+                if let Some(end) = rest.iter().position(|&c| c == ';') {
+                    let body = &rest[2..end];
+                    let is_numeric_entity = if let Some(first) = body.first() {
+                        if *first == 'x' || *first == 'X' {
+                            body.len() > 1 && body[1..].iter().all(|c| c.is_ascii_hexdigit())
+                        } else {
+                            body.iter().all(|c| c.is_ascii_digit())
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_numeric_entity {
+                        Some(end + 1)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            if let Some(len) = entity_len {
+                out.extend(rest[..len].iter().copied());
+                i += len;
             } else {
                 out.push_str("&amp;");
+                i += 1;
             }
-            i += 1;
             continue;
         }
 
