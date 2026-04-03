@@ -80,6 +80,11 @@ pub async fn build_providers(config: &AppConfig) -> Result<Arc<ProviderRegistry>
     Ok(registry)
 }
 
+/// Header injected before skill instructions in the system prompt.
+const SKILLS_SECTION_HEADER: &str =
+    "# Skills\n\nThe following skills are available and their instructions should be \
+followed when relevant:\n\n";
+
 /// Build the tool registry from config.
 pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     let policy = ExecutionPolicy {
@@ -242,7 +247,7 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> S
         if active.is_empty() {
             String::new()
         } else {
-            let mut section = "# Skills\n\nThe following skills are available and their instructions should be followed when relevant:\n\n".to_string();
+            let mut section = SKILLS_SECTION_HEADER.to_string();
             for skill in &active {
                 section.push_str(&format!(
                     "## {} — {}\n\n{}\n\n",
@@ -326,49 +331,22 @@ For cron tasks, prefer the native `cron_job` tool. For delegated execution, pref
         policy.max_concurrent
     );
 
+    // Assemble prompt sections; optional sections are only added when non-empty.
+    let mut sections: Vec<&str> = vec![
+        identity.trim(),
+        soul.trim(),
+        tools_profile.trim(),
+        memory_index.trim(),
+    ];
     if boot_mode {
-        if skills_section.is_empty() {
-            format!(
-                "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-                identity.trim(),
-                soul.trim(),
-                tools_profile.trim(),
-                memory_index.trim(),
-                boot.trim(),
-                capabilities.trim()
-            )
-        } else {
-            format!(
-                "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-                identity.trim(),
-                soul.trim(),
-                tools_profile.trim(),
-                memory_index.trim(),
-                boot.trim(),
-                skills_section.trim(),
-                capabilities.trim()
-            )
-        }
-    } else if skills_section.is_empty() {
-        format!(
-            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-            identity.trim(),
-            soul.trim(),
-            tools_profile.trim(),
-            memory_index.trim(),
-            capabilities.trim()
-        )
-    } else {
-        format!(
-            "{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}\n\n---\n\n{}",
-            identity.trim(),
-            soul.trim(),
-            tools_profile.trim(),
-            memory_index.trim(),
-            skills_section.trim(),
-            capabilities.trim()
-        )
+        sections.push(boot.trim());
     }
+    if !skills_section.is_empty() {
+        sections.push(skills_section.trim());
+    }
+    sections.push(capabilities.trim());
+
+    sections.join("\n\n---\n\n")
 }
 
 /// Build the agent runtime from config.

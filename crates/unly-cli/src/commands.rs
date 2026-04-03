@@ -16,6 +16,7 @@ use unly_telegram::{SessionStore, TelegramBot};
 use crate::{
     logging::init_logging,
     service::{build_providers, build_runtime, build_tools, build_tools_with_scheduler},
+    update as self_update,
 };
 
 /// Unly - self-hosted personal AI agent platform.
@@ -95,6 +96,13 @@ pub enum Commands {
         /// Skip all confirmation prompts.
         #[arg(long)]
         skip: bool,
+    },
+
+    /// Check for a newer release and optionally install it.
+    Update {
+        /// Only print whether an update is available without installing it.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -595,6 +603,30 @@ impl Cli {
             }
 
             Commands::Uninstall { skip } => run_uninstall_wizard(skip).await,
+
+            Commands::Update { check } => {
+                if check {
+                    match self_update::check_update().await {
+                        Ok(Some((current, latest, url))) => {
+                            println!("Update available: v{} → v{}", current, latest);
+                            println!("Release: {}", url);
+                            println!("\nRun `unly update` to install.");
+                        }
+                        Ok(None) => {
+                            println!(
+                                "Already up-to-date (v{}).",
+                                env!("CARGO_PKG_VERSION")
+                            );
+                        }
+                        Err(e) => bail!("update check failed: {}", e),
+                    }
+                } else {
+                    self_update::perform_update()
+                        .await
+                        .context("self-update failed")?;
+                }
+                Ok(())
+            }
         }
     }
 }
