@@ -811,12 +811,22 @@ fn convert_to_telegram_html(text: &str) -> String {
         // ── Fenced code block ``` … ``` ──────────────────────────────────────
         if i + 2 < n && chars[i] == '`' && chars[i + 1] == '`' && chars[i + 2] == '`' {
             i += 3;
-            // skip optional language hint (everything up to the first newline)
-            while i < n && chars[i] != '\n' {
-                i += 1;
+            // Skip an optional language hint only if a newline appears before
+            // the closing fence. Otherwise, treat same-line content as code.
+            let mut j = i;
+            let mut has_language_hint = false;
+            while j < n {
+                if j + 2 < n && chars[j] == '`' && chars[j + 1] == '`' && chars[j + 2] == '`' {
+                    break;
+                }
+                if chars[j] == '\n' {
+                    has_language_hint = true;
+                    break;
+                }
+                j += 1;
             }
-            if i < n {
-                i += 1; // consume the newline
+            if has_language_hint {
+                i = j + 1; // consume the newline after the language hint
             }
             let code_start = i;
             let mut closed = false;
