@@ -334,15 +334,14 @@ fn bundled_service_template_has_no_security_sandbox() {
         );
     }
 
-    // The service must run as the dedicated 'unly' account (created by the
-    // installer at `unly service install` time).
+    // Service user/group are rendered dynamically at install time.
     assert!(
-        template.contains("User=unly"),
-        "template must set User=unly"
+        template.contains("User=__UNLY_SERVICE_USER__"),
+        "template must contain User placeholder"
     );
     assert!(
-        template.contains("Group=unly"),
-        "template must set Group=unly"
+        template.contains("Group=__UNLY_SERVICE_GROUP__"),
+        "template must contain Group placeholder"
     );
 
     // Restart policy must be present so the service recovers from transient

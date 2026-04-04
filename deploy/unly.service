@@ -8,8 +8,8 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=unly
-Group=unly
+User=__UNLY_SERVICE_USER__
+Group=__UNLY_SERVICE_GROUP__
 WorkingDirectory=__UNLY_WORKING_DIRECTORY__
 ExecStart=__UNLY_EXECUTABLE__ start --config __UNLY_CONFIG_PATH__
 ExecReload=/bin/kill -HUP $MAINPID

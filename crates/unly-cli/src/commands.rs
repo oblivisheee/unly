@@ -1226,6 +1226,8 @@ fn cargo_unly_binary_path() -> PathBuf {
 
 const BUNDLED_SYSTEMD_UNIT: &str = include_str!("../../../deploy/unly.service");
 const SYSTEMD_UNIT_NAME: &str = "unly.service";
+const UNIT_SERVICE_USER_PLACEHOLDER: &str = "__UNLY_SERVICE_USER__";
+const UNIT_SERVICE_GROUP_PLACEHOLDER: &str = "__UNLY_SERVICE_GROUP__";
 const UNIT_WORKING_DIR_PLACEHOLDER: &str = "__UNLY_WORKING_DIRECTORY__";
 const UNIT_EXECUTABLE_PLACEHOLDER: &str = "__UNLY_EXECUTABLE__";
 const UNIT_CONFIG_PATH_PLACEHOLDER: &str = "__UNLY_CONFIG_PATH__";
@@ -1252,8 +1254,6 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
         );
     }
 
-    ensure_unly_user()?;
-
     let rendered = render_systemd_unit(config_path)?;
     let tmp_unit = std::env::temp_dir().join(format!("unly-{}.service", std::process::id()));
     std::fs::write(&tmp_unit, rendered)
@@ -1273,7 +1273,8 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
 }
 
 fn render_systemd_unit(config_path: &Path) -> Result<String> {
-    let user_home = resolve_invoking_user_home()?;
+    let account = resolve_service_account()?;
+    let user_home = account.home;
     let resolved_config_path = resolve_config_path_for_unit(config_path, &user_home)?;
     let working_dir = resolved_config_path.parent().with_context(|| {
         format!(
@@ -1282,15 +1283,25 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
         )
     })?;
     let executable = user_home.join(".cargo").join("bin").join("unly");
-    render_systemd_unit_with_paths(working_dir, &executable, &resolved_config_path)
+    render_systemd_unit_with_paths(
+        &account.username,
+        &account.group,
+        working_dir,
+        &executable,
+        &resolved_config_path,
+    )
 }
 
 fn render_systemd_unit_with_paths(
+    service_user: &str,
+    service_group: &str,
     working_dir: &Path,
     executable: &Path,
     config_path: &Path,
 ) -> Result<String> {
     let rendered = BUNDLED_SYSTEMD_UNIT
+        .replace(UNIT_SERVICE_USER_PLACEHOLDER, service_user)
+        .replace(UNIT_SERVICE_GROUP_PLACEHOLDER, service_group)
         .replace(
             UNIT_WORKING_DIR_PLACEHOLDER,
             &working_dir.display().to_string(),
@@ -1305,6 +1316,8 @@ fn render_systemd_unit_with_paths(
         );
 
     for placeholder in [
+        UNIT_SERVICE_USER_PLACEHOLDER,
+        UNIT_SERVICE_GROUP_PLACEHOLDER,
         UNIT_WORKING_DIR_PLACEHOLDER,
         UNIT_EXECUTABLE_PLACEHOLDER,
         UNIT_CONFIG_PATH_PLACEHOLDER,
@@ -1315,6 +1328,12 @@ fn render_systemd_unit_with_paths(
     }
 
     Ok(rendered)
+}
+
+struct ServiceAccount {
+    username: String,
+    group: String,
+    home: PathBuf,
 }
 
 fn resolve_config_path_for_unit(config_path: &Path, user_home: &Path) -> Result<PathBuf> {
@@ -1333,18 +1352,24 @@ fn resolve_config_path_for_unit(config_path: &Path, user_home: &Path) -> Result<
         .context("resolving absolute config path for systemd unit")
 }
 
-fn resolve_invoking_user_home() -> Result<PathBuf> {
-    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-        if !sudo_user.is_empty() {
-            if let Some(home) = lookup_home_dir_for_user(&sudo_user)? {
-                return Ok(home);
-            }
-        }
-    }
+fn resolve_service_account() -> Result<ServiceAccount> {
+    let username = std::env::var("SUDO_USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
+        .unwrap_or_else(|| "root".to_string());
 
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .context("resolving HOME for systemd unit rendering")
+    let home = lookup_home_dir_for_user(&username)?
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .with_context(|| format!("resolving home directory for user '{username}'"))?;
+
+    let group = lookup_primary_group_for_user(&username)?.unwrap_or_else(|| username.clone());
+
+    Ok(ServiceAccount {
+        username,
+        group,
+        home,
+    })
 }
 
 fn lookup_home_dir_for_user(username: &str) -> Result<Option<PathBuf>> {
@@ -1374,52 +1399,51 @@ fn lookup_home_dir_for_user(username: &str) -> Result<Option<PathBuf>> {
     Ok(Some(PathBuf::from(home)))
 }
 
-/// Create the system group and user `unly` if they do not already exist.
-///
-/// This is called during `unly service install` so that the installed
-/// systemd unit can run as a dedicated unprivileged account with no login
-/// shell, while still having access to the full filesystem.
-fn ensure_unly_user() -> Result<()> {
-    // Check / create group ────────────────────────────────────────────────────
-    let group_exists = ProcessCommand::new("getent")
-        .args(["group", "unly"])
+fn lookup_primary_group_for_user(username: &str) -> Result<Option<String>> {
+    let passwd_output = match ProcessCommand::new("getent")
+        .args(["passwd", username])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("running getent to resolve primary group"),
+    };
 
-    if !group_exists {
-        run_command_with_optional_sudo("groupadd", &["--system", "unly"])
-            .context("creating system group 'unly'")?;
-        println!("Created system group 'unly'.");
+    if !passwd_output.status.success() {
+        return Ok(None);
     }
 
-    // Check / create user ─────────────────────────────────────────────────────
-    let user_exists = ProcessCommand::new("getent")
-        .args(["passwd", "unly"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if !user_exists {
-        run_command_with_optional_sudo(
-            "useradd",
-            &[
-                "--system",
-                "--no-create-home",
-                "--gid",
-                "unly",
-                "--shell",
-                "/sbin/nologin",
-                "--comment",
-                "Unly Agent Service Account",
-                "unly",
-            ],
-        )
-        .context("creating system user 'unly'")?;
-        println!("Created system user 'unly'.");
+    let passwd_line = String::from_utf8(passwd_output.stdout)
+        .context("decoding getent passwd output as UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let gid = passwd_line.split(':').nth(3).unwrap_or("").trim();
+    if gid.is_empty() {
+        return Ok(None);
     }
 
-    Ok(())
+    let group_output = match ProcessCommand::new("getent").args(["group", gid]).output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("running getent group to resolve group name"),
+    };
+    if !group_output.status.success() {
+        return Ok(None);
+    }
+
+    let group_line = String::from_utf8(group_output.stdout)
+        .context("decoding getent group output as UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let group = group_line.split(':').next().unwrap_or("").trim();
+    if group.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(group.to_string()))
 }
 
 fn ensure_systemd_available() -> Result<()> {
@@ -1567,16 +1591,22 @@ mod tests {
     #[test]
     fn render_systemd_unit_replaces_placeholders() {
         let rendered = render_systemd_unit_with_paths(
+            "alice",
+            "alice",
             Path::new("/home/alice/.unly"),
             Path::new("/home/alice/.cargo/bin/unly"),
             Path::new("/home/alice/.unly/config.toml"),
         )
         .expect("render_systemd_unit_with_paths should not fail");
 
+        assert!(rendered.contains("User=alice"));
+        assert!(rendered.contains("Group=alice"));
         assert!(rendered.contains("WorkingDirectory=/home/alice/.unly"));
         assert!(rendered.contains(
             "ExecStart=/home/alice/.cargo/bin/unly start --config /home/alice/.unly/config.toml"
         ));
+        assert!(!rendered.contains(UNIT_SERVICE_USER_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_SERVICE_GROUP_PLACEHOLDER));
         assert!(!rendered.contains(UNIT_WORKING_DIR_PLACEHOLDER));
         assert!(!rendered.contains(UNIT_EXECUTABLE_PLACEHOLDER));
         assert!(!rendered.contains(UNIT_CONFIG_PATH_PLACEHOLDER));
