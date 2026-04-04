@@ -120,19 +120,19 @@ impl AgentContext {
     /// Build messages with optional memory context injected as an extra system message.
     pub fn build_messages_with_memory(&self, memory_context: Option<&str>) -> Vec<ChatMessage> {
         let mut msgs = self.build_messages();
-        if let Some(mem) = memory_context {
-            if !mem.trim().is_empty() {
-                msgs.insert(
-                    1,
-                    ChatMessage {
-                        role: "system".to_string(),
-                        content: unly_core::model::ChatMessageContent::Text(mem.to_string()),
-                        tool_call_id: None,
-                        tool_calls: None,
-                        name: None,
-                    },
-                );
-            }
+        if let Some(mem) = memory_context
+            && !mem.trim().is_empty()
+        {
+            msgs.insert(
+                1,
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: unly_core::model::ChatMessageContent::Text(mem.to_string()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                    name: None,
+                },
+            );
         }
         msgs
     }

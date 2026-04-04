@@ -56,10 +56,10 @@ pub fn resolve_default_config_path() -> std::path::PathBuf {
 }
 
 fn apply_env_overrides(config: &mut AppConfig) {
-    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
-        if !token.is_empty() {
-            config.telegram.bot_token = token;
-        }
+    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN")
+        && !token.is_empty()
+    {
+        config.telegram.bot_token = token;
     }
     if let Ok(admins) = std::env::var("TELEGRAM_ADMIN_USER_IDS") {
         let ids: Vec<i64> = admins

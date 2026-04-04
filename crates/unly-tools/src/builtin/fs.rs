@@ -202,14 +202,14 @@ impl Tool for FsWriteTool {
         }
 
         let path = PathBuf::from(path_str);
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Ok(ToolResult::error(
-                    ctx.tool_call_id.clone(),
-                    e.to_string(),
-                    start.elapsed().as_millis() as u64,
-                ));
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                e.to_string(),
+                start.elapsed().as_millis() as u64,
+            ));
         }
 
         let result = if append {
@@ -394,14 +394,14 @@ impl Tool for FsCopyTool {
             }
         };
 
-        if let Some(parent) = dst.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Ok(ToolResult::error(
-                    ctx.tool_call_id.clone(),
-                    format!("failed to create destination directory: {}", e),
-                    start.elapsed().as_millis() as u64,
-                ));
-            }
+        if let Some(parent) = dst.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                format!("failed to create destination directory: {}", e),
+                start.elapsed().as_millis() as u64,
+            ));
         }
 
         match std::fs::copy(&src, &dst) {
@@ -478,14 +478,14 @@ impl Tool for FsMoveTool {
             }
         };
 
-        if let Some(parent) = dst.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return Ok(ToolResult::error(
-                    ctx.tool_call_id.clone(),
-                    format!("failed to create destination directory: {}", e),
-                    start.elapsed().as_millis() as u64,
-                ));
-            }
+        if let Some(parent) = dst.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                format!("failed to create destination directory: {}", e),
+                start.elapsed().as_millis() as u64,
+            ));
         }
 
         match std::fs::rename(&src, &dst) {

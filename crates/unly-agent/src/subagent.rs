@@ -380,10 +380,10 @@ This subagent completed partial work up to this point; review the logs for progr
     }
 
     pub async fn stop_subagent(&self, subagent_id: &str) -> Result<()> {
-        if let Ok(mut tasks) = SUBAGENT_TASKS.lock() {
-            if let Some(handle) = tasks.remove(subagent_id) {
-                handle.abort();
-            }
+        if let Ok(mut tasks) = SUBAGENT_TASKS.lock()
+            && let Some(handle) = tasks.remove(subagent_id)
+        {
+            handle.abort();
         }
         let finished = chrono::Utc::now().to_rfc3339();
         self.db
@@ -420,10 +420,10 @@ This subagent completed partial work up to this point; review the logs for progr
             ),
         );
         let row = self.db.conn().query_one(stmt).await.ok().flatten();
-        if let Some(r) = row {
-            if let Ok(cnt) = r.try_get::<i64>("", "cnt") {
-                return cnt.max(0) as u64;
-            }
+        if let Some(r) = row
+            && let Ok(cnt) = r.try_get::<i64>("", "cnt")
+        {
+            return cnt.max(0) as u64;
         }
         0
     }

@@ -714,77 +714,77 @@ impl TelegramBot {
                 .await?;
             return Ok(());
         }
-        if let Some(mut pending_ctx) = self.sessions.get(tg_chat_id) {
-            if !pending_ctx.pending_approvals.is_empty() {
-                if self.effective_auto_approve() {
-                    let mut response = self.runtime.process_approved(&mut pending_ctx).await;
-                    for _ in 0..8 {
-                        match response {
-                            Ok(AgentResponse::ApprovalRequired { .. }) => {
-                                response = self.runtime.process_approved(&mut pending_ctx).await;
-                            }
-                            _ => break,
-                        }
-                    }
-                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
-                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
-                    }
-                    self.sessions.set(tg_chat_id, pending_ctx);
+        if let Some(mut pending_ctx) = self.sessions.get(tg_chat_id)
+            && !pending_ctx.pending_approvals.is_empty()
+        {
+            if self.effective_auto_approve() {
+                let mut response = self.runtime.process_approved(&mut pending_ctx).await;
+                for _ in 0..8 {
                     match response {
-                        Ok(AgentResponse::Text(answer)) => {
-                            send_response_text(&bot, msg.chat.id, &answer).await?;
+                        Ok(AgentResponse::ApprovalRequired { .. }) => {
+                            response = self.runtime.process_approved(&mut pending_ctx).await;
                         }
-                        Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            let keyboard = InlineKeyboardMarkup::new(vec![vec![
-                                InlineKeyboardButton::callback("Approve", "approve"),
-                                InlineKeyboardButton::callback("Deny", "deny"),
-                            ]]);
-                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
-                                .parse_mode(ParseMode::Html)
-                                .reply_markup(keyboard)
-                                .await?;
-                        }
-                        Err(e) => {
-                            bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
-                                .await?;
-                        }
+                        _ => break,
                     }
-                    return Ok(());
                 }
-                if is_affirmative_approval(&text) {
-                    let response = self.runtime.process_approved(&mut pending_ctx).await;
-                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
-                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
+                    error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                }
+                self.sessions.set(tg_chat_id, pending_ctx);
+                match response {
+                    Ok(AgentResponse::Text(answer)) => {
+                        send_response_text(&bot, msg.chat.id, &answer).await?;
                     }
-                    self.sessions.set(tg_chat_id, pending_ctx);
-                    match response {
-                        Ok(AgentResponse::Text(answer)) => {
-                            send_response_text(&bot, msg.chat.id, &answer).await?;
-                        }
-                        Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            let keyboard = InlineKeyboardMarkup::new(vec![vec![
-                                InlineKeyboardButton::callback("Approve", "approve"),
-                                InlineKeyboardButton::callback("Deny", "deny"),
-                            ]]);
-                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
-                                .reply_markup(keyboard)
-                                .await?;
-                        }
-                        Err(e) => {
-                            bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
-                                .await?;
-                        }
+                    Ok(AgentResponse::ApprovalRequired { pending }) => {
+                        let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                            InlineKeyboardButton::callback("Approve", "approve"),
+                            InlineKeyboardButton::callback("Deny", "deny"),
+                        ]]);
+                        bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                            .parse_mode(ParseMode::Html)
+                            .reply_markup(keyboard)
+                            .await?;
                     }
-                    return Ok(());
+                    Err(e) => {
+                        bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
+                            .await?;
+                    }
                 }
-                if is_negative_approval(&text) {
-                    let denied = std::mem::take(&mut pending_ctx.pending_approvals);
-                    self.sessions.set(tg_chat_id, pending_ctx);
-                    let details = format_pending_approvals(&denied);
-                    bot.send_message(msg.chat.id, format!("Denied tool executions:\n{}", details))
-                        .await?;
-                    return Ok(());
+                return Ok(());
+            }
+            if is_affirmative_approval(&text) {
+                let response = self.runtime.process_approved(&mut pending_ctx).await;
+                if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
+                    error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
                 }
+                self.sessions.set(tg_chat_id, pending_ctx);
+                match response {
+                    Ok(AgentResponse::Text(answer)) => {
+                        send_response_text(&bot, msg.chat.id, &answer).await?;
+                    }
+                    Ok(AgentResponse::ApprovalRequired { pending }) => {
+                        let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                            InlineKeyboardButton::callback("Approve", "approve"),
+                            InlineKeyboardButton::callback("Deny", "deny"),
+                        ]]);
+                        bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                            .reply_markup(keyboard)
+                            .await?;
+                    }
+                    Err(e) => {
+                        bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
+                            .await?;
+                    }
+                }
+                return Ok(());
+            }
+            if is_negative_approval(&text) {
+                let denied = std::mem::take(&mut pending_ctx.pending_approvals);
+                self.sessions.set(tg_chat_id, pending_ctx);
+                let details = format_pending_approvals(&denied);
+                bot.send_message(msg.chat.id, format!("Denied tool executions:\n{}", details))
+                    .await?;
+                return Ok(());
             }
         }
 
@@ -872,36 +872,33 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         ctx.tool_approval_override = Some(self.effective_auto_approve());
 
         // Keep in-memory context bound to persisted chat id even for old sessions.
-        if let Ok(row) = &chat_row {
-            if let Ok(bound_chat_id) = ChatId::from_str(&row.id) {
-                if ctx.chat_id != bound_chat_id {
-                    ctx.chat_id = bound_chat_id;
-                }
-            }
+        if let Ok(row) = &chat_row
+            && let Ok(bound_chat_id) = ChatId::from_str(&row.id)
+            && ctx.chat_id != bound_chat_id
+        {
+            ctx.chat_id = bound_chat_id;
         }
 
         // Restore message history from DB when the in-memory session is empty.
         // Explicit conversation reset commands skip history restore once.
         let skip_history_restore = self.sessions.take_skip_history_restore(tg_chat_id);
-        if ctx.messages.is_empty() && !skip_history_restore {
-            if let Ok(chat_row_hist) = &chat_row {
-                // Load the last 40 messages (20 turns) to bound context size.
-                if let Ok(history) = chat_repo.list_messages(&chat_row_hist.id, 40).await {
-                    for row in history {
-                        let text_content = serde_json::from_str::<serde_json::Value>(&row.content)
-                            .ok()
-                            .and_then(|v| {
-                                v.get("text").and_then(|t| t.as_str()).map(str::to_string)
-                            })
-                            .unwrap_or(row.content);
-                        ctx.push_message(unly_core::model::ChatMessage {
-                            role: row.role,
-                            content: unly_core::model::ChatMessageContent::Text(text_content),
-                            tool_call_id: None,
-                            tool_calls: None,
-                            name: None,
-                        });
-                    }
+        if ctx.messages.is_empty() && !skip_history_restore
+            && let Ok(chat_row_hist) = &chat_row
+        {
+            // Load the last 40 messages (20 turns) to bound context size.
+            if let Ok(history) = chat_repo.list_messages(&chat_row_hist.id, 40).await {
+                for row in history {
+                    let text_content = serde_json::from_str::<serde_json::Value>(&row.content)
+                        .ok()
+                        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+                        .unwrap_or(row.content);
+                    ctx.push_message(unly_core::model::ChatMessage {
+                        role: row.role,
+                        content: unly_core::model::ChatMessageContent::Text(text_content),
+                        tool_call_id: None,
+                        tool_calls: None,
+                        name: None,
+                    });
                 }
             }
         }
@@ -1263,29 +1260,29 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             });
         }
 
-        if let Some(photos) = msg.photo() {
-            if let Some(photo) = photos.last() {
-                let file = bot.get_file(photo.file.id.clone()).await?;
-                let mut bytes = Vec::new();
-                bot.download_file(&file.path, &mut bytes).await?;
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                let uri = format!("data:image/jpeg;base64,{}", b64);
-                parts.push(ContentPart::ImageUrl {
-                    image_url: ImageUrl {
-                        url: uri,
-                        detail: Some("high".to_string()),
-                    },
-                });
-            }
+        if let Some(photos) = msg.photo()
+            && let Some(photo) = photos.last()
+        {
+            let file = bot.get_file(photo.file.id.clone()).await?;
+            let mut bytes = Vec::new();
+            bot.download_file(&file.path, &mut bytes).await?;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let uri = format!("data:image/jpeg;base64,{}", b64);
+            parts.push(ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: uri,
+                    detail: Some("high".to_string()),
+                },
+            });
         }
 
         if parts.is_empty() {
             return Ok(None);
         }
-        if parts.len() == 1 {
-            if let ContentPart::Text { text } = &parts[0] {
-                return Ok(Some(ChatMessageContent::Text(text.clone())));
-            }
+        if parts.len() == 1
+            && let ContentPart::Text { text } = &parts[0]
+        {
+            return Ok(Some(ChatMessageContent::Text(text.clone())));
         }
         Ok(Some(ChatMessageContent::Parts(parts)))
     }
@@ -1457,10 +1454,10 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         }
 
         if handled {
-            if delete_callback_message {
-                if let Some(msg_ref) = q.message.as_ref() {
-                    let _ = bot.delete_message(msg_ref.chat().id, msg_ref.id()).await;
-                }
+            if delete_callback_message
+                && let Some(msg_ref) = q.message.as_ref()
+            {
+                let _ = bot.delete_message(msg_ref.chat().id, msg_ref.id()).await;
             }
             let _ = bot.answer_callback_query(q.id).await;
         }
@@ -1619,13 +1616,13 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             SubagentMenuView::Recent => "subagents:back_recent",
         };
         let mut controls = vec![InlineKeyboardButton::callback("Back", back_cb)];
-        if let Some(d) = self.load_subagent_detail(subagent_id).await {
-            if d.status == "running" || d.status == "pending" {
-                controls.push(InlineKeyboardButton::callback(
-                    "Stop",
-                    format!("subagent:stop:{}", subagent_id),
-                ));
-            }
+        if let Some(d) = self.load_subagent_detail(subagent_id).await
+            && (d.status == "running" || d.status == "pending")
+        {
+            controls.push(InlineKeyboardButton::callback(
+                "Stop",
+                format!("subagent:stop:{}", subagent_id),
+            ));
         }
         let keyboard = InlineKeyboardMarkup::new(vec![controls]);
         let _ = bot
@@ -2339,15 +2336,15 @@ fn convert_to_telegram_html(text: &str) -> String {
         // ── Italic *…* ────────────────────────────────────────────────────────
         if chars[i] == '*' && (i + 1 >= n || chars[i + 1] != '*') {
             let start = i + 1;
-            if let Some(j) = chars[start..].iter().position(|&c| c == '*') {
-                if j > 0 {
-                    let txt: String = chars[start..start + j].iter().collect();
-                    out.push_str("<i>");
-                    push_html_escaped(&mut out, &txt);
-                    out.push_str("</i>");
-                    i = start + j + 1;
-                    continue;
-                }
+            if let Some(j) = chars[start..].iter().position(|&c| c == '*')
+                && j > 0
+            {
+                let txt: String = chars[start..start + j].iter().collect();
+                out.push_str("<i>");
+                push_html_escaped(&mut out, &txt);
+                out.push_str("</i>");
+                i = start + j + 1;
+                continue;
             }
         }
 

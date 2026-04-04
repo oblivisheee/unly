@@ -1137,10 +1137,10 @@ fn run_uninstall_cli(skip: bool) -> Result<()> {
     let service_unit_path = PathBuf::from("/etc/systemd/system").join(SYSTEMD_UNIT_NAME);
 
     let mut candidates = vec![cargo_path];
-    if let Some(current) = current_exe {
-        if !candidates.iter().any(|p| p == &current) {
-            candidates.push(current);
-        }
+    if let Some(current) = current_exe
+        && !candidates.iter().any(|p| p == &current)
+    {
+        candidates.push(current);
     }
 
     let existing: Vec<PathBuf> = candidates.into_iter().filter(|p| p.exists()).collect();

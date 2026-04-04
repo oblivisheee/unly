@@ -199,10 +199,10 @@ impl CopilotProvider {
         // Check if the existing token is still valid.
         {
             let guard = self.copilot_token.read();
-            if let Some(token) = guard.as_ref() {
-                if token.expires_at > Utc::now() + chrono::Duration::seconds(30) {
-                    return Ok(token.token.clone());
-                }
+            if let Some(token) = guard.as_ref()
+                && token.expires_at > Utc::now() + chrono::Duration::seconds(30)
+            {
+                return Ok(token.token.clone());
             }
         }
 
