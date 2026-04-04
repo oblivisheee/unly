@@ -23,19 +23,16 @@ fn binary() -> PathBuf {
 /// Create an isolated temp workspace directory under `/tmp/unly-tests/<name>`.
 /// Returns the path; the caller owns the directory for the test lifetime.
 fn tmp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("unly-tests")
-        .join(format!("{}-{}", name, std::process::id()));
+    let dir =
+        std::env::temp_dir()
+            .join("unly-tests")
+            .join(format!("{}-{}", name, std::process::id()));
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
 
 /// Run the binary with optional args, env vars, and a forced `UNLY_HOME`.
-fn run(
-    args: &[&str],
-    unly_home: &Path,
-    extra_env: &[(&str, &str)],
-) -> Output {
+fn run(args: &[&str], unly_home: &Path, extra_env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(binary());
     cmd.args(args)
         .env("UNLY_HOME", unly_home)
@@ -104,11 +101,7 @@ fn init_config_creates_valid_toml_file() {
     let home = tmp_dir("init-config");
     let config_path = home.join("config.toml");
 
-    let out = run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    let out = run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
     assert_success(&out);
 
     assert!(
@@ -119,8 +112,7 @@ fn init_config_creates_valid_toml_file() {
     let content = fs::read_to_string(&config_path).expect("read config file");
 
     // Must be valid TOML.
-    let parsed: toml::Value = toml::from_str(&content)
-        .expect("init-config must write valid TOML");
+    let parsed: toml::Value = toml::from_str(&content).expect("init-config must write valid TOML");
 
     // Must contain the top-level sections required for the service to start.
     for section in &["telegram", "database", "providers", "tools", "logging"] {
@@ -148,23 +140,16 @@ fn init_config_refuses_to_overwrite_existing_file() {
     let config_path = home.join("config.toml");
 
     // First call — should succeed.
-    let out1 = run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    let out1 = run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
     assert_success(&out1);
     let original = fs::read_to_string(&config_path).expect("read config file");
 
     // Second call on the same path — must fail.
-    let out2 = run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    let out2 = run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
     let error_msg = assert_failure(&out2);
     assert!(
-        error_msg.to_lowercase().contains("already exists") || error_msg.to_lowercase().contains("exist"),
+        error_msg.to_lowercase().contains("already exists")
+            || error_msg.to_lowercase().contains("exist"),
         "error message must mention that the file already exists: {}",
         error_msg
     );
@@ -185,17 +170,16 @@ fn validate_succeeds_with_env_credentials() {
 
     // First create a minimal config file (bot_token + admin filled via env).
     let config_path = home.join("config.toml");
-    run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
 
     let out = run(
         &["--config", config_path.to_str().unwrap(), "validate"],
         &home,
         &[
-            ("TELEGRAM_BOT_TOKEN", "1234567890:AAFakeTokenForTestingPurposesOnly"),
+            (
+                "TELEGRAM_BOT_TOKEN",
+                "1234567890:AAFakeTokenForTestingPurposesOnly",
+            ),
             ("TELEGRAM_ADMIN_USER_IDS", "123456789"),
         ],
     );
@@ -214,11 +198,7 @@ fn validate_fails_without_bot_token() {
     let home = tmp_dir("validate-fail");
 
     let config_path = home.join("config.toml");
-    run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
 
     let out = run(
         &["--config", config_path.to_str().unwrap(), "validate"],
@@ -241,17 +221,16 @@ fn validate_fails_without_admin_ids() {
     let home = tmp_dir("validate-no-admins");
 
     let config_path = home.join("config.toml");
-    run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
 
     let out = run(
         &["--config", config_path.to_str().unwrap(), "validate"],
         &home,
         // Provide token but NO admin IDs.
-        &[("TELEGRAM_BOT_TOKEN", "1234567890:AAFakeTokenForTestingPurposesOnly")],
+        &[(
+            "TELEGRAM_BOT_TOKEN",
+            "1234567890:AAFakeTokenForTestingPurposesOnly",
+        )],
     );
     let err = assert_failure(&out);
     assert!(
@@ -270,17 +249,16 @@ fn migrate_runs_successfully_against_new_database() {
     let config_path = home.join("config.toml");
 
     // Generate config file pointing at a fresh db in our temp dir.
-    run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
 
     let out = run(
         &["--config", config_path.to_str().unwrap(), "migrate"],
         &home,
         &[
-            ("TELEGRAM_BOT_TOKEN", "1234567890:AAFakeTokenForTestingPurposesOnly"),
+            (
+                "TELEGRAM_BOT_TOKEN",
+                "1234567890:AAFakeTokenForTestingPurposesOnly",
+            ),
             ("TELEGRAM_ADMIN_USER_IDS", "123456789"),
         ],
     );
@@ -306,14 +284,13 @@ fn migrate_is_idempotent() {
     let home = tmp_dir("migrate-idempotent");
     let config_path = home.join("config.toml");
 
-    run(
-        &["init-config", config_path.to_str().unwrap()],
-        &home,
-        &[],
-    );
+    run(&["init-config", config_path.to_str().unwrap()], &home, &[]);
 
     let env_vars = &[
-        ("TELEGRAM_BOT_TOKEN", "1234567890:AAFakeTokenForTestingPurposesOnly"),
+        (
+            "TELEGRAM_BOT_TOKEN",
+            "1234567890:AAFakeTokenForTestingPurposesOnly",
+        ),
         ("TELEGRAM_ADMIN_USER_IDS", "123456789"),
     ];
 
@@ -387,10 +364,7 @@ fn bundled_service_template_has_no_security_sandbox() {
     );
 
     // The unit must be parseable as text (no null bytes, valid UTF-8).
-    assert!(
-        !template.is_empty(),
-        "template must not be empty"
-    );
+    assert!(!template.is_empty(), "template must not be empty");
 }
 
 /// The bundled `deploy/unly.service` must contain all mandatory systemd

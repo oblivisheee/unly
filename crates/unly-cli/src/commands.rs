@@ -1270,26 +1270,8 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
 }
 
 fn render_systemd_unit(config_path: &Path) -> Result<String> {
-    let current_exe = std::env::current_exe().context("resolving current executable path")?;
-    let workdir = workspace::workspace_dir();
-
-    let mut out = String::new();
-
-    for line in BUNDLED_SYSTEMD_UNIT.lines() {
-        if line.starts_with("WorkingDirectory=") {
-            out.push_str(&format!("WorkingDirectory={}\n", workdir.display()));
-        } else if line.starts_with("ExecStart=") {
-            out.push_str(&format!(
-                "ExecStart={} start --config {}\n",
-                current_exe.display(),
-                config_path.display()
-            ));
-        } else {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    Ok(out)
+    let _ = config_path;
+    Ok(BUNDLED_SYSTEMD_UNIT.to_string())
 }
 
 /// Create the system group and user `unly` if they do not already exist.
@@ -1483,58 +1465,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_systemd_unit_replaces_dynamic_fields() {
+    fn render_systemd_unit_matches_bundled_template() {
         let config_path = Path::new("/tmp/test-unly/config.toml");
-        let rendered = render_systemd_unit(config_path)
-            .expect("render_systemd_unit should not fail");
-
-        // ExecStart must point to the actual binary and config path.
-        assert!(
-            rendered.contains("ExecStart="),
-            "rendered unit must contain ExecStart="
-        );
-        assert!(
-            rendered.contains("--config /tmp/test-unly/config.toml"),
-            "rendered ExecStart must embed config_path"
-        );
-
-        // WorkingDirectory must be replaced with workspace_dir(), not the
-        // hardcoded /opt/unly placeholder from the template.
-        assert!(
-            !rendered.contains("WorkingDirectory=/opt/unly"),
-            "rendered unit must not contain hardcoded WorkingDirectory=/opt/unly"
-        );
-
-        // User and Group must remain as 'unly' (the dedicated service account).
-        assert!(
-            rendered.contains("User=unly\n"),
-            "rendered unit must retain User=unly"
-        );
-        assert!(
-            rendered.contains("Group=unly\n"),
-            "rendered unit must retain Group=unly"
-        );
-
-        // No security sandbox directives must appear in the rendered unit.
-        assert!(
-            !rendered.contains("ProtectSystem="),
-            "rendered unit must not contain ProtectSystem="
-        );
-        assert!(
-            !rendered.contains("ProtectHome="),
-            "rendered unit must not contain ProtectHome="
-        );
-        assert!(
-            !rendered.contains("NoNewPrivileges="),
-            "rendered unit must not contain NoNewPrivileges="
-        );
-        assert!(
-            !rendered.contains("PrivateTmp="),
-            "rendered unit must not contain PrivateTmp="
-        );
-        assert!(
-            !rendered.contains("ReadWritePaths="),
-            "rendered unit must not contain ReadWritePaths="
+        let rendered =
+            render_systemd_unit(config_path).expect("render_systemd_unit should not fail");
+        assert_eq!(
+            rendered, BUNDLED_SYSTEMD_UNIT,
+            "rendered systemd unit must match bundled deploy template"
         );
     }
 }
