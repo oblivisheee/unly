@@ -78,6 +78,7 @@ impl ToolRegistry {
         args: serde_json::Value,
         ctx: ToolContext,
         approved: bool,
+        force_approval: bool,
     ) -> Result<ToolResult> {
         let tool = self
             .tools
@@ -89,7 +90,7 @@ impl ToolRegistry {
         let schema = tool.schema();
 
         // Policy check: approval required?
-        if self.policy.needs_approval(&schema.risk) && !approved {
+        if (self.policy.needs_approval(&schema.risk) || force_approval) && !approved {
             info!(
                 tool = %name,
                 risk = ?schema.risk,

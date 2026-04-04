@@ -37,6 +37,11 @@ pub struct AgentContext {
     pub turn_count: u32,
     pub subagent_depth: u32,
     pub pending_approvals: Vec<PendingApproval>,
+    /// Per-session override for tool approval behavior.
+    /// - Some(true): allow tool calls without approval prompts.
+    /// - Some(false): require approval for all tool calls.
+    /// - None: use global tool policy.
+    pub tool_approval_override: Option<bool>,
     pub created_at: Timestamp,
     /// Accumulated reasoning/tool-use steps (Mode 1 — never shown to the user).
     pub thinking_log: Vec<ThinkingStep>,
@@ -83,6 +88,7 @@ impl AgentContext {
             turn_count: 0,
             subagent_depth: 0,
             pending_approvals: Vec::new(),
+            tool_approval_override: None,
             created_at: unly_core::types::now(),
             thinking_log: Vec::new(),
             pending_media: Vec::new(),
@@ -98,6 +104,15 @@ impl AgentContext {
             tool_calls: None,
             name: None,
         }];
+        if let Some(mode_prompt) = self.tool_approval_mode_prompt() {
+            msgs.push(ChatMessage {
+                role: "system".to_string(),
+                content: unly_core::model::ChatMessageContent::Text(mode_prompt),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            });
+        }
         msgs.extend(self.messages.clone());
         msgs
     }
@@ -140,6 +155,20 @@ impl AgentContext {
         if self.messages.len() > max_messages {
             let remove = self.messages.len() - max_messages;
             self.messages.drain(0..remove);
+        }
+    }
+
+    fn tool_approval_mode_prompt(&self) -> Option<String> {
+        match self.tool_approval_override {
+            Some(true) => Some(
+                "Tool approval mode is AUTO. If tools are needed, call them directly without asking the user for permission in plain text."
+                    .to_string(),
+            ),
+            Some(false) => Some(
+                "Tool approval mode is MANUAL. If tools are needed, call them directly and let the runtime handle approve/deny prompts. Do not ask for permission in plain text."
+                    .to_string(),
+            ),
+            None => None,
         }
     }
 }

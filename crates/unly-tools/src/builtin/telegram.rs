@@ -163,7 +163,10 @@ impl Tool for TelegramSendDocumentTool {
 
         let mut result = ToolResult::success(
             ctx.tool_call_id.clone(),
-            format!("Document queued for delivery to the Telegram chat: {}", path),
+            format!(
+                "Document queued for delivery to the Telegram chat: {}",
+                path
+            ),
             start.elapsed().as_millis() as u64,
         );
         result.metadata = json!({

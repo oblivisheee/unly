@@ -5,6 +5,8 @@ use teloxide::utils::command::BotCommands;
 pub enum Command {
     #[command(description = "Start or reset the conversation.")]
     Start,
+    #[command(description = "Start a new conversation.")]
+    New,
     #[command(description = "Show this help message.")]
     Help,
     #[command(description = "Show current status and health.")]

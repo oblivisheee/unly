@@ -1,27 +1,32 @@
 use base64::Engine;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use teloxide::{
     net::Download,
     prelude::*,
-    types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ParseMode},
+    types::{
+        CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, ParseMode,
+    },
     utils::command::BotCommands,
 };
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
 use unly_agent::{
-    AgentContext, AgentResponse, AgentRuntime, StreamEvent, SubagentManager, SubagentRequest,
-    SubagentSpawnConfig,
+    AgentContext, AgentResponse, AgentRuntime, MediaKind, StreamEvent, SubagentManager,
+    SubagentRequest, SubagentSpawnConfig,
 };
 use unly_audit::AuditLogger;
 use unly_config::{workspace, AppConfig, DbType};
+use unly_core::ids::ChatId;
 use unly_core::model::{ChatMessageContent, ContentPart, ImageUrl};
-use unly_core::{ids::ChatId, permissions::Permission};
 use unly_db::Database;
 use unly_providers::ProviderRegistry;
-use unly_tools::builtin::{register_cron_executor, register_subagent_executor};
+use unly_tools::builtin::{
+    orchestration::build_notify_message, register_cron_executor, register_subagent_executor,
+};
 
 use crate::{
     commands::Command,
@@ -41,6 +46,17 @@ pub struct TelegramBot {
 }
 
 impl TelegramBot {
+    fn default_auto_approve(&self) -> bool {
+        let policy = self.runtime.tool_policy();
+        !policy.require_approval_for_privileged && !policy.require_approval_for_dangerous
+    }
+
+    fn effective_auto_approve(&self) -> bool {
+        self.sessions
+            .global_auto_approve()
+            .unwrap_or_else(|| self.default_auto_approve())
+    }
+
     pub fn new(
         config: Arc<AppConfig>,
         sessions: SessionStore,
@@ -80,9 +96,11 @@ impl TelegramBot {
                 let provider_fallback = subagent_default_provider.clone();
                 let model_fallback = subagent_default_model.clone();
                 Box::pin(async move {
+                    let is_child_subagent = parent_agent_id.is_some();
+                    let parent_agent_id = parent_agent_id.unwrap_or_default();
                     let request = SubagentRequest {
                         goal: goal.clone(),
-                        parent_agent_id: parent_agent_id.unwrap_or_default(),
+                        parent_agent_id,
                         depth: 0,
                         permissions,
                         provider: Some(provider.unwrap_or(provider_fallback)),
@@ -102,60 +120,71 @@ impl TelegramBot {
                                 format!("Subagent spawned with task: {}", shorten_goal(&goal)),
                             )
                             .await;
-                        let id = handle.id.to_string();
-                        let subagents = subagents.clone();
-                        tokio::spawn(async move {
-                            wait_and_notify_subagent_result(
-                                &bot,
-                                &subagents,
-                                teloxide::types::ChatId(tg_chat_id),
-                                id,
-                            )
-                            .await;
-                        });
+                        if !is_child_subagent {
+                            let id = handle.id.to_string();
+                            let subagents = subagents.clone();
+                            tokio::spawn(async move {
+                                wait_and_notify_subagent_result(
+                                    &bot,
+                                    &subagents,
+                                    teloxide::types::ChatId(tg_chat_id),
+                                    id,
+                                )
+                                .await;
+                            });
+                        }
                     }
                     Ok(handle.id.to_string())
                 })
             },
         ));
 
-        register_cron_executor(Arc::new(move |task, chat_id, notify_mode, trigger| {
-            let runtime = runtime_for_cron_tool.clone();
-            let db = db_for_cron.clone();
-            let token = token_for_cron.clone();
-            let provider = cron_default_provider.clone();
-            let model = cron_default_model.clone();
-            Box::pin(async move {
-                let mut ctx = AgentContext::new(
-                    chat_id,
-                    None,
-                    unly_core::permissions::PermissionSet::admin(),
-                    provider,
-                    model,
-                    runtime.config().system_prompt.clone(),
-                );
-                let result_text = match runtime.process(&mut ctx, task.clone()).await {
-                    Ok(AgentResponse::Text(text)) => text,
-                    Ok(AgentResponse::ApprovalRequired { pending }) => {
-                        format!("approval required for {} tool calls", pending.len())
+        register_cron_executor(Arc::new(
+            move |task, chat_id, telegram_chat_id, notify_mode, trigger| {
+                let runtime = runtime_for_cron_tool.clone();
+                let db = db_for_cron.clone();
+                let token = token_for_cron.clone();
+                let provider = cron_default_provider.clone();
+                let model = cron_default_model.clone();
+                Box::pin(async move {
+                    let mut ctx = AgentContext::new(
+                        chat_id,
+                        None,
+                        unly_core::permissions::PermissionSet::admin(),
+                        provider,
+                        model,
+                        runtime.config().system_prompt.clone(),
+                    );
+                    let result_text = match runtime.process(&mut ctx, task.clone()).await {
+                        Ok(AgentResponse::Text(text)) => text,
+                        Ok(AgentResponse::ApprovalRequired { .. }) => {
+                            match runtime.process_approved(&mut ctx).await {
+                                Ok(AgentResponse::Text(text)) => text,
+                                Ok(AgentResponse::ApprovalRequired { pending }) => {
+                                    format!("approval required for {} tool calls", pending.len())
+                                }
+                                Err(e) => return Err(e.to_string()),
+                            }
+                        }
+                        Err(e) => return Err(e.to_string()),
+                    };
+                    if notify_mode != "silent" {
+                        let resolved_tg_chat_id = match telegram_chat_id {
+                            Some(id) => Some(id),
+                            None => resolve_telegram_chat_id(&db, chat_id).await,
+                        };
+                        if let Some(tg_chat_id) = resolved_tg_chat_id {
+                            let bot = Bot::new(token);
+                            let notify = build_notify_message(&task, &trigger, &result_text);
+                            let _ = bot
+                                .send_message(teloxide::types::ChatId(tg_chat_id), notify)
+                                .await;
+                        }
                     }
-                    Err(e) => return Err(e.to_string()),
-                };
-                if notify_mode == "message" {
-                    if let Some(tg_chat_id) = resolve_telegram_chat_id(&db, chat_id).await {
-                        let bot = Bot::new(token);
-                        let notify = format!(
-                            "Cron job executed ({})\nTask: {}\nResult: {}",
-                            trigger, task, result_text
-                        );
-                        let _ = bot
-                            .send_message(teloxide::types::ChatId(tg_chat_id), notify)
-                            .await;
-                    }
-                }
-                Ok(result_text)
-            })
-        }));
+                    Ok(result_text)
+                })
+            },
+        ));
 
         Self {
             config,
@@ -172,6 +201,10 @@ impl TelegramBot {
     pub async fn start(self: Arc<Self>) {
         let token = self.config.telegram.bot_token.clone();
         let bot = Bot::new(token);
+
+        if let Err(e) = bot.set_my_commands(Command::bot_commands()).await {
+            warn!(error = %e, "failed to set native Telegram command list");
+        }
 
         info!("starting Telegram bot polling");
 
@@ -241,35 +274,42 @@ impl TelegramBot {
                 format!("command: {:?}", cmd),
                 "not in allowlist",
             );
-            bot.send_message(msg.chat.id, " You are not authorized to use this bot.")
+            bot.send_message(msg.chat.id, "You are not authorized to use this bot.")
                 .await?;
             return Ok(());
         }
 
         match cmd {
             Command::Start => {
-                info!(
-                    user = tg_user_id,
-                    chat_id = tg_chat_id,
-                    "session started"
-                );
+                info!(user = tg_user_id, chat_id = tg_chat_id, "session started");
                 self.sessions.remove(tg_chat_id);
+                self.sessions.mark_skip_history_restore(tg_chat_id);
                 if workspace::is_boot_mode() {
                     let boot_start = self.generate_boot_start_message(tg_user_id).await;
                     send_response_text(&bot, msg.chat.id, &boot_start).await?;
                     let _ = workspace::mark_boot_prompted();
                 } else {
-                    bot.send_message(msg.chat.id, "Hello. I'm Unly. How can I help?")
-                        .await?;
+                    let start_text = self.generate_start_message(tg_user_id).await;
+                    send_response_text(&bot, msg.chat.id, &start_text).await?;
+                }
+            }
+            Command::New => {
+                info!(user = tg_user_id, chat_id = tg_chat_id, "session restarted");
+                self.sessions.remove(tg_chat_id);
+                self.sessions.mark_skip_history_restore(tg_chat_id);
+                if workspace::is_boot_mode() {
+                    let boot_start = self.generate_boot_start_message(tg_user_id).await;
+                    send_response_text(&bot, msg.chat.id, &boot_start).await?;
+                    let _ = workspace::mark_boot_prompted();
+                } else {
+                    let start_text = self.generate_start_message(tg_user_id).await;
+                    send_response_text(&bot, msg.chat.id, &start_text).await?;
                 }
             }
             Command::Reset => {
-                info!(
-                    user = tg_user_id,
-                    chat_id = tg_chat_id,
-                    "session reset"
-                );
+                info!(user = tg_user_id, chat_id = tg_chat_id, "session reset");
                 self.sessions.remove(tg_chat_id);
+                self.sessions.mark_skip_history_restore(tg_chat_id);
                 bot.send_message(msg.chat.id, "Session reset. Send your next request.")
                     .await?;
             }
@@ -284,23 +324,60 @@ impl TelegramBot {
 
             Command::Status => {
                 let reports = self.provider_registry.health_all().await;
-                let mut lines = vec!["System Status".to_string()];
+                let mut lines = vec!["System status".to_string()];
                 for r in &reports {
-                    let icon = match r.status {
-                        unly_core::types::HealthStatus::Healthy => "",
-                        unly_core::types::HealthStatus::Degraded => "",
-                        unly_core::types::HealthStatus::Unhealthy => "",
-                        unly_core::types::HealthStatus::Unknown => "",
+                    let health = match r.status {
+                        unly_core::types::HealthStatus::Healthy => "healthy",
+                        unly_core::types::HealthStatus::Degraded => "degraded",
+                        unly_core::types::HealthStatus::Unhealthy => "unhealthy",
+                        unly_core::types::HealthStatus::Unknown => "unknown",
                     };
                     lines.push(format!(
-                        "{} {}: {}",
-                        icon,
+                        "{}: {} ({})",
                         r.name,
-                        r.message.as_deref().unwrap_or("ok")
+                        r.message.as_deref().unwrap_or("ok"),
+                        health
                     ));
                 }
                 let sessions = self.sessions.len();
-                lines.push(format!(" Active sessions: {}", sessions));
+                lines.push(format!("Active sessions: {}", sessions));
+
+                // Show current approval mode.
+                let auto_approve = self.effective_auto_approve();
+                let approval_mode = if auto_approve {
+                    "auto (prompts disabled)"
+                } else {
+                    "manual (tool approval prompts)"
+                };
+                lines.push(format!("Approval mode: {}", approval_mode));
+
+                // Show active job count from DB.
+                let job_repo = unly_db::repo::job::JobRepo::new(self.db.conn());
+                match job_repo.list_enabled().await {
+                    Ok(jobs) => {
+                        lines.push(format!("Active cron jobs: {}", jobs.len()));
+                    }
+                    Err(_) => {
+                        lines.push("Active cron jobs: unavailable".to_string());
+                    }
+                }
+
+                // Show current provider/model for this session.
+                if let Some(ctx) = self.sessions.get(tg_chat_id) {
+                    lines.push(format!("Provider/model: {}/{}", ctx.provider, ctx.model));
+                } else {
+                    let default_provider = self
+                        .provider_registry
+                        .default_provider()
+                        .map(|p| p.name().to_string())
+                        .unwrap_or_else(|_| "copilot".to_string());
+                    let default_model = self.provider_registry.default_model();
+                    lines.push(format!(
+                        "Provider/model (default): {}/{}",
+                        default_provider, default_model
+                    ));
+                }
+
                 bot.send_message(msg.chat.id, lines.join("\n")).await?;
             }
 
@@ -372,7 +449,7 @@ impl TelegramBot {
                 }
                 if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
                     if ctx.pending_approvals.is_empty() {
-                        bot.send_message(msg.chat.id, "ℹ No pending approvals.")
+                        bot.send_message(msg.chat.id, "No pending approvals.")
                             .await?;
                         return Ok(());
                     }
@@ -391,6 +468,9 @@ impl TelegramBot {
                     );
 
                     let response = self.runtime.process_approved(&mut ctx).await;
+                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut ctx).await {
+                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                    }
                     self.sessions.set(tg_chat_id, ctx);
 
                     match response {
@@ -398,21 +478,17 @@ impl TelegramBot {
                             send_response_text(&bot, msg.chat.id, &text).await?;
                         }
                         Ok(AgentResponse::ApprovalRequired { pending }) => {
-                            bot.send_message(
-                                msg.chat.id,
-                                format_approval_prompt(&pending),
-                            )
-                            .parse_mode(ParseMode::Html)
-                            .await?;
+                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                                .parse_mode(ParseMode::Html)
+                                .await?;
                         }
                         Err(e) => {
-                            bot.send_message(msg.chat.id, format!(" Error after approval: {}", e))
+                            bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
                                 .await?;
                         }
                     }
                 } else {
-                    bot.send_message(msg.chat.id, "ℹ No active session.")
-                        .await?;
+                    bot.send_message(msg.chat.id, "No active session.").await?;
                 }
             }
 
@@ -432,7 +508,7 @@ impl TelegramBot {
                     let pending = std::mem::take(&mut ctx.pending_approvals);
                     self.sessions.set(tg_chat_id, ctx);
                     if pending.is_empty() {
-                        bot.send_message(msg.chat.id, "ℹ No pending approvals.")
+                        bot.send_message(msg.chat.id, "No pending approvals.")
                             .await?;
                     } else {
                         let names: Vec<&str> =
@@ -451,13 +527,12 @@ impl TelegramBot {
                         );
                         bot.send_message(
                             msg.chat.id,
-                            format!(" Denied tool executions: {}", names.join(", ")),
+                            format!("Denied tool executions: {}", names.join(", ")),
                         )
                         .await?;
                     }
                 } else {
-                    bot.send_message(msg.chat.id, "ℹ No active session.")
-                        .await?;
+                    bot.send_message(msg.chat.id, "No active session.").await?;
                 }
             }
             Command::Approval(mode) => match mode.trim().to_lowercase().as_str() {
@@ -468,15 +543,44 @@ impl TelegramBot {
                         mode = "auto",
                         "approval mode changed"
                     );
-                    self.audit.success(
-                        "approval_mode",
-                        tg_user_id.to_string(),
-                        "set mode=auto",
-                    );
-                    self.sessions.set_auto_approve(tg_chat_id, true);
+                    self.audit
+                        .success("approval_mode", tg_user_id.to_string(), "set mode=auto");
+                    self.sessions.set_global_auto_approve(true);
+                    if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
+                        ctx.tool_approval_override = Some(true);
+                        self.sessions.set(tg_chat_id, ctx);
+                    }
+                    let policy = self.runtime.tool_policy();
+                    let affected: Vec<&str> = [
+                        if policy.require_approval_for_privileged {
+                            Some("privileged")
+                        } else {
+                            None
+                        },
+                        if policy.require_approval_for_dangerous {
+                            Some("dangerous")
+                        } else {
+                            None
+                        },
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    let affected_str = if affected.is_empty() {
+                        "Global policy does not require approvals.".to_string()
+                    } else {
+                        format!(
+                            "Global policy requires approval for {} tools.",
+                            affected.join(" and ")
+                        )
+                    };
                     bot.send_message(
                         msg.chat.id,
-                        "Approval mode set to AUTO. Tool actions run without approve/deny prompts.",
+                        format!(
+                            "Approval mode set to auto.\n\
+                             {affected_str}\n\
+                             Tool calls will run without approval prompts."
+                        ),
                     )
                     .await?;
                 }
@@ -487,15 +591,58 @@ impl TelegramBot {
                         mode = "manual",
                         "approval mode changed"
                     );
-                    self.audit.success(
-                        "approval_mode",
-                        tg_user_id.to_string(),
-                        "set mode=manual",
-                    );
-                    self.sessions.set_auto_approve(tg_chat_id, false);
+                    self.audit
+                        .success("approval_mode", tg_user_id.to_string(), "set mode=manual");
+                    self.sessions.set_global_auto_approve(false);
+                    if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
+                        ctx.tool_approval_override = Some(false);
+                        self.sessions.set(tg_chat_id, ctx);
+                    }
+                    let policy = self.runtime.tool_policy();
+                    let affected: Vec<&str> = [
+                        if policy.require_approval_for_privileged {
+                            Some("privileged")
+                        } else {
+                            None
+                        },
+                        if policy.require_approval_for_dangerous {
+                            Some("dangerous")
+                        } else {
+                            None
+                        },
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    let affected_str = if affected.is_empty() {
+                        "Global policy does not require additional tool approvals, but manual mode is active".to_string()
+                    } else {
+                        format!(
+                            "Global policy requires approval for {} tools",
+                            affected.join(" and ")
+                        )
+                    };
                     bot.send_message(
                         msg.chat.id,
-                        "Approval mode set to MANUAL. Pending actions require explicit approval.",
+                        format!(
+                            "Approval mode set to manual.\n\
+                             {affected_str}.\n\
+                             Tool calls will ask for confirmation before execution.\n\
+                             Use /approval auto to switch back."
+                        ),
+                    )
+                    .await?;
+                }
+                "" => {
+                    // Show current mode when called without argument.
+                    let auto = self.effective_auto_approve();
+                    let mode_str = if auto { "AUTO" } else { "MANUAL" };
+                    bot.send_message(
+                        msg.chat.id,
+                        format!(
+                            "Current approval mode: {mode_str}\n\
+                             Use /approval auto or /approval manual to change."
+                        ),
                     )
                     .await?;
                 }
@@ -508,7 +655,7 @@ impl TelegramBot {
                     );
                     bot.send_message(
                         msg.chat.id,
-                        "Invalid approval mode. Use: /approval manual or /approval auto",
+                        "Invalid approval mode. Use: /approval manual | /approval auto | /approval (show current)",
                     )
                     .await?;
                 }
@@ -542,7 +689,7 @@ impl TelegramBot {
                 chat_id = tg_chat_id,
                 "unauthorized message blocked"
             );
-            bot.send_message(msg.chat.id, " You are not authorized to use this bot.")
+            bot.send_message(msg.chat.id, "You are not authorized to use this bot.")
                 .await?;
             return Ok(());
         }
@@ -569,7 +716,7 @@ impl TelegramBot {
         }
         if let Some(mut pending_ctx) = self.sessions.get(tg_chat_id) {
             if !pending_ctx.pending_approvals.is_empty() {
-                if self.sessions.get_flags(tg_chat_id).auto_approve {
+                if self.effective_auto_approve() {
                     let mut response = self.runtime.process_approved(&mut pending_ctx).await;
                     for _ in 0..8 {
                         match response {
@@ -578,6 +725,9 @@ impl TelegramBot {
                             }
                             _ => break,
                         }
+                    }
+                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
+                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
                     }
                     self.sessions.set(tg_chat_id, pending_ctx);
                     match response {
@@ -589,13 +739,10 @@ impl TelegramBot {
                                 InlineKeyboardButton::callback("Approve", "approve"),
                                 InlineKeyboardButton::callback("Deny", "deny"),
                             ]]);
-                            bot.send_message(
-                                msg.chat.id,
-                                format_approval_prompt(&pending),
-                            )
-                            .parse_mode(ParseMode::Html)
-                            .reply_markup(keyboard)
-                            .await?;
+                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                                .parse_mode(ParseMode::Html)
+                                .reply_markup(keyboard)
+                                .await?;
                         }
                         Err(e) => {
                             bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
@@ -606,6 +753,9 @@ impl TelegramBot {
                 }
                 if is_affirmative_approval(&text) {
                     let response = self.runtime.process_approved(&mut pending_ctx).await;
+                    if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut pending_ctx).await {
+                        error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                    }
                     self.sessions.set(tg_chat_id, pending_ctx);
                     match response {
                         Ok(AgentResponse::Text(answer)) => {
@@ -616,12 +766,9 @@ impl TelegramBot {
                                 InlineKeyboardButton::callback("Approve", "approve"),
                                 InlineKeyboardButton::callback("Deny", "deny"),
                             ]]);
-                            bot.send_message(
-                                msg.chat.id,
-                                format_approval_prompt(&pending),
-                            )
-                            .reply_markup(keyboard)
-                            .await?;
+                            bot.send_message(msg.chat.id, format_approval_prompt(&pending))
+                                .reply_markup(keyboard)
+                                .await?;
                         }
                         Err(e) => {
                             bot.send_message(msg.chat.id, format!("Error after approval: {}", e))
@@ -657,7 +804,7 @@ impl TelegramBot {
                         error!(chat_id = tg_chat_id, error = %e, "failed to finalize boot");
                         bot.send_message(
                             msg.chat.id,
-                            " Failed to finalize BOOT profile. Please try again.",
+                            "Failed to finalize BOOT profile. Please try again.",
                         )
                         .await?;
                         return Ok(());
@@ -686,32 +833,81 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             }
         }
 
+        // Resolve persistent chat row first so runtime ChatId is bound to DB chat id.
+        let chat_repo = unly_db::repo::chat::ChatRepo::new(self.db.conn());
+        let chat_row = chat_repo
+            .get_or_create_chat(tg_chat_id, msg.chat.title().or(msg.chat.username()))
+            .await;
+
         // Get or create session context.
-        let ctx = self.sessions.get(tg_chat_id).unwrap_or_else(|| {
-            let permissions = build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
-            let chat_id = ChatId::new();
-            // The runtime already has the system prompt baked in — pass empty here so
-            // it gets overridden by the runtime's configured prompt on first build_messages().
-            AgentContext::new(
-                chat_id,
-                None,
-                permissions,
-                self.provider_registry
-                    .default_provider()
-                    .map(|p| p.name().to_string())
-                    .unwrap_or_else(|_| "copilot".to_string()),
-                self.provider_registry.default_model(),
-                // system_prompt comes from runtime config; keep context-level value aligned.
-                self.runtime.config().system_prompt.clone(),
-            )
-        });
+        // If this is a fresh context (no in-memory session), try to restore
+        // conversation history from the database so the agent remembers
+        // previous exchanges after a restart.
+        let mut ctx = match self.sessions.get(tg_chat_id) {
+            Some(existing) => existing,
+            None => {
+                let permissions =
+                    build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
+                let chat_id = chat_row
+                    .as_ref()
+                    .ok()
+                    .and_then(|row| ChatId::from_str(&row.id).ok())
+                    .unwrap_or_else(ChatId::new);
+                // The runtime already has the system prompt baked in — pass empty here so
+                // it gets overridden by the runtime's configured prompt on first build_messages().
+                AgentContext::new(
+                    chat_id,
+                    None,
+                    permissions,
+                    self.provider_registry
+                        .default_provider()
+                        .map(|p| p.name().to_string())
+                        .unwrap_or_else(|_| "copilot".to_string()),
+                    self.provider_registry.default_model(),
+                    // system_prompt comes from runtime config; keep context-level value aligned.
+                    self.runtime.config().system_prompt.clone(),
+                )
+            }
+        };
+        ctx.tool_approval_override = Some(self.effective_auto_approve());
+
+        // Keep in-memory context bound to persisted chat id even for old sessions.
+        if let Ok(row) = &chat_row {
+            if let Ok(bound_chat_id) = ChatId::from_str(&row.id) {
+                if ctx.chat_id != bound_chat_id {
+                    ctx.chat_id = bound_chat_id;
+                }
+            }
+        }
+
+        // Restore message history from DB when the in-memory session is empty.
+        // Explicit conversation reset commands skip history restore once.
+        let skip_history_restore = self.sessions.take_skip_history_restore(tg_chat_id);
+        if ctx.messages.is_empty() && !skip_history_restore {
+            if let Ok(chat_row_hist) = &chat_row {
+                // Load the last 40 messages (20 turns) to bound context size.
+                if let Ok(history) = chat_repo.list_messages(&chat_row_hist.id, 40).await {
+                    for row in history {
+                        let text_content = serde_json::from_str::<serde_json::Value>(&row.content)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                            })
+                            .unwrap_or(row.content);
+                        ctx.push_message(unly_core::model::ChatMessage {
+                            role: row.role,
+                            content: unly_core::model::ChatMessageContent::Text(text_content),
+                            tool_call_id: None,
+                            tool_calls: None,
+                            name: None,
+                        });
+                    }
+                }
+            }
+        }
 
         let trimmed = text.trim();
-        let subagent_goal = if let Some(goal) = parse_spawn_subagent_request(trimmed) {
-            Some(goal)
-        } else {
-            classify_subagent_spawn_request(self.runtime.clone(), ctx.clone(), trimmed).await
-        };
+        let subagent_goal = parse_spawn_subagent_request(trimmed);
         if let Some(goal) = subagent_goal {
             // Persist session immediately so /approve can always resolve chat context.
             self.sessions.set(tg_chat_id, ctx.clone());
@@ -764,12 +960,6 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                 }
             }
         });
-
-        // Persist the message.
-        let chat_repo = unly_db::repo::chat::ChatRepo::new(self.db.conn());
-        let chat_row = chat_repo
-            .get_or_create_chat(tg_chat_id, msg.chat.title().or(msg.chat.username()))
-            .await;
 
         if let Ok(chat_row) = &chat_row {
             let msg_row = unly_db::repo::chat::MessageRow {
@@ -863,68 +1053,91 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                     let _ = typing_stop_tx.send(true);
                     return Ok(());
                 }
-                StreamEvent::ApprovalRequired(pending) => {
-                    let _ = typing_stop_tx.send(true);
-                    if self.sessions.get_flags(tg_chat_id).auto_approve {
-                        if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
-                            ctx.pending_approvals = pending.clone();
-                            let mut response = self.runtime.process_approved(&mut ctx).await;
-                            for _ in 0..8 {
-                                match response {
-                                    Ok(AgentResponse::ApprovalRequired { .. }) => {
-                                        response = self.runtime.process_approved(&mut ctx).await;
-                                    }
-                                    _ => break,
-                                }
-                            }
-                            self.sessions.set(tg_chat_id, ctx);
-                            match response {
-                                Ok(AgentResponse::Text(text)) => {
-                                    if let Err(e) =
-                                        send_response_text(&bot, msg.chat.id, &text).await
-                                    {
-                                        error!(
-                                            chat_id = tg_chat_id,
-                                            error = %e,
-                                            "failed to send auto-approved response"
-                                        );
-                                    }
-                                }
-                                Ok(AgentResponse::ApprovalRequired { pending: p }) => {
-                                    let keyboard = InlineKeyboardMarkup::new(vec![vec![
-                                        InlineKeyboardButton::callback("Approve", "approve"),
-                                        InlineKeyboardButton::callback("Deny", "deny"),
-                                    ]]);
-                                    let _ = bot
-                                        .send_message(
-                                            msg.chat.id,
-                                            format_approval_prompt(&p),
-                                        )
-                                        .parse_mode(ParseMode::Html)
-                                        .reply_markup(keyboard)
-                                        .await;
-                                }
-                                Err(e) => {
-                                    let _ = bot
-                                        .send_message(
-                                            msg.chat.id,
-                                            format!("Error after approval: {}", e),
-                                        )
-                                        .await;
-                                }
-                            }
-                            return Ok(());
-                        }
+                StreamEvent::SendMedia {
+                    kind,
+                    path,
+                    caption,
+                } => {
+                    if let Err(e) =
+                        send_media(&bot, msg.chat.id, &kind, &path, caption.as_deref()).await
+                    {
+                        error!(
+                            chat_id = tg_chat_id,
+                            error = %e,
+                            media_kind = ?kind,
+                            media_path = %path,
+                            "failed to send streamed media"
+                        );
                     }
+                }
+                StreamEvent::ApprovalRequired {
+                    pending,
+                    ctx: event_ctx,
+                } => {
+                    let _ = typing_stop_tx.send(true);
+                    if self.effective_auto_approve() {
+                        // Use the context snapshot from the event rather than
+                        // fetching from sessions to avoid a race where the
+                        // background task has not yet called sessions.set().
+                        let mut ctx = *event_ctx;
+                        let mut response = self.runtime.process_approved(&mut ctx).await;
+                        for _ in 0..8 {
+                            match response {
+                                Ok(AgentResponse::ApprovalRequired { .. }) => {
+                                    response = self.runtime.process_approved(&mut ctx).await;
+                                }
+                                _ => break,
+                            }
+                        }
+                        if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut ctx).await {
+                            error!(
+                                chat_id = tg_chat_id,
+                                error = %e,
+                                "failed to send auto-approved media"
+                            );
+                        }
+                        self.sessions.set(tg_chat_id, ctx);
+                        match response {
+                            Ok(AgentResponse::Text(text)) => {
+                                if let Err(e) = send_response_text(&bot, msg.chat.id, &text).await {
+                                    error!(
+                                        chat_id = tg_chat_id,
+                                        error = %e,
+                                        "failed to send auto-approved response"
+                                    );
+                                }
+                            }
+                            Ok(AgentResponse::ApprovalRequired { pending: p }) => {
+                                let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                                    InlineKeyboardButton::callback("Approve", "approve"),
+                                    InlineKeyboardButton::callback("Deny", "deny"),
+                                ]]);
+                                let _ = bot
+                                    .send_message(msg.chat.id, format_approval_prompt(&p))
+                                    .parse_mode(ParseMode::Html)
+                                    .reply_markup(keyboard)
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = bot
+                                    .send_message(
+                                        msg.chat.id,
+                                        format!("Error after approval: {}", e),
+                                    )
+                                    .await;
+                            }
+                        }
+                        return Ok(());
+                    }
+                    // Manual approval: save the context snapshot to sessions so
+                    // handle_callback can resume from the correct state.
+                    self.sessions.set(tg_chat_id, *event_ctx);
                     let keyboard = InlineKeyboardMarkup::new(vec![vec![
                         InlineKeyboardButton::callback("Approve", "approve"),
                         InlineKeyboardButton::callback("Deny", "deny"),
                     ]]);
                     if let Err(e) = bot
-                        .send_message(
-                            msg.chat.id,
-                            format_approval_prompt(&pending),
-                        )
+                        .send_message(msg.chat.id, format_approval_prompt(&pending))
                         .parse_mode(ParseMode::Html)
                         .reply_markup(keyboard)
                         .await
@@ -961,7 +1174,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         let sql = "SELECT id, status, depth, goal, model, updated_at, parent_agent_id \
                    FROM subagents \
                    ORDER BY updated_at DESC \
-                   LIMIT 20";
+                   LIMIT 4";
         let stmt = Statement::from_string(
             match self.db.db_type() {
                 DbType::Postgres => DatabaseBackend::Postgres,
@@ -1120,6 +1333,10 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                             .await?;
                     } else {
                         let response = self.runtime.process_approved(&mut ctx).await;
+                        if let Err(e) = drain_pending_media(&bot, message.chat().id, &mut ctx).await
+                        {
+                            error!(chat_id = tg_chat_id, error = %e, "failed to send approved media");
+                        }
                         self.sessions.set(tg_chat_id, ctx);
                         match response {
                             Ok(AgentResponse::Text(text)) => {
@@ -1316,7 +1533,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             text.push_str("\nNo subagents in this view.");
         } else {
             text.push_str("\nSelect a parent subagent:");
-            for s in selected.iter().take(12) {
+            for s in selected.iter().take(4) {
                 text.push_str(&format!("\n• {}", format_subagent_row_html(s)));
             }
         }
@@ -1325,7 +1542,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             InlineKeyboardButton::callback("Active", "subagents:active"),
             InlineKeyboardButton::callback("Recent", "subagents:recent"),
         ]];
-        for s in selected.iter().take(10) {
+        for s in selected.iter().take(4) {
             let short_id = s.id.chars().take(8).collect::<String>();
             let label = format!("{} [{}]", short_id, s.status);
             rows_buttons.push(vec![InlineKeyboardButton::callback(
@@ -1367,7 +1584,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                     .join("\n")
             };
             let body = format!(
-                "<b>Subagent</b> <code>{}</code>\nStatus: <code>{}</code>\nDepth: <code>{}</code>\nModel: <code>{}</code>\nUpdated: <code>{}</code>\nHeartbeat: <code>{}</code>\nTask: {}\n{}\n\n<b>Child subagents</b>\n{}\n\n<b>Recent actions</b>\n<pre>{}</pre>",
+                "<b>Subagent</b> <code>{}</code>\nStatus: <code>{}</code>\nDepth: <code>{}</code>\nModel: <code>{}</code>\nUpdated: <code>{}</code>\nHeartbeat: <code>{}</code>\nTask: {}\n{}\n\n<b>Child subagents</b>\n{}\n\n<b>Result</b>\n<pre>{}</pre>\n\n<b>Recent actions</b>\n<pre>{}</pre>",
                 escape_html(&d.id),
                 escape_html(&d.status),
                 d.depth,
@@ -1377,6 +1594,12 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                 escape_html(&d.goal.unwrap_or_else(|| "-".to_string())),
                 escape_html(&current),
                 child_lines,
+                escape_html(
+                    &d.result
+                        .as_deref()
+                        .map(|r| truncate_for_message(r, 1800))
+                        .unwrap_or_else(|| "No result yet.".to_string()),
+                ),
                 escape_html(if tail.is_empty() { "No log entries yet." } else { &tail })
             );
             let back = if d.status == "running" || d.status == "pending" {
@@ -1415,7 +1638,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
 
     async fn load_subagent_detail(&self, subagent_id: &str) -> Option<SubagentDetailRow> {
         let sql = format!(
-            "SELECT id, status, depth, goal, model, updated_at \
+            "SELECT id, status, depth, goal, model, updated_at, result \
              FROM subagents WHERE id='{}' LIMIT 1",
             escape_sql(subagent_id)
         );
@@ -1434,6 +1657,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
             goal: row.try_get("", "goal").ok(),
             model: row.try_get("", "model").ok(),
             updated_at: row.try_get("", "updated_at").ok(),
+            result: row.try_get("", "result").ok(),
         })
     }
 
@@ -1492,6 +1716,31 @@ Return plain text only, no markdown formatting.";
             Ok(AgentResponse::Text(t)) if !t.trim().is_empty() => t,
             _ => "Initial setup.\nTell me how I should communicate (tone, brevity/detail, language) and what tasks to prioritize.\nLet me know when you're finished."
                 .to_string(),
+        }
+    }
+
+    async fn generate_start_message(&self, tg_user_id: i64) -> String {
+        let permissions = build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
+        let mut ctx = AgentContext::new(
+            ChatId::new(),
+            None,
+            permissions,
+            self.provider_registry
+                .default_provider()
+                .map(|p| p.name().to_string())
+                .unwrap_or_else(|_| "copilot".to_string()),
+            self.provider_registry.default_model(),
+            self.runtime.config().system_prompt.clone(),
+        );
+        let prompt =
+            "Generate a short greeting message (1 sentence) for the beginning of a new chat. \
+Keep it calm and professional. \
+Do not use markdown, lists, or emojis. \
+Do not mention settings or technical details. \
+Return plain text only.";
+        match self.runtime.process(&mut ctx, prompt).await {
+            Ok(AgentResponse::Text(t)) if !t.trim().is_empty() => t,
+            _ => "Hello. How can I help?".to_string(),
         }
     }
 
@@ -1647,37 +1896,6 @@ BOOT transcript:\n{}",
     }
 }
 
-async fn classify_subagent_spawn_request(
-    runtime: Arc<AgentRuntime>,
-    mut ctx: AgentContext,
-    user_text: &str,
-) -> Option<String> {
-    if !ctx.permissions.has(&Permission::UseSubagents) {
-        return None;
-    }
-    let prompt = format!(
-        "Determine if this message is a request to create/spawn a subagent.\n\
-Return JSON only: {{\"spawn\": true|false, \"goal\": \"...\"}}.\n\
-If spawn=false, goal must be empty.\n\
-Message:\n{}",
-        user_text
-    );
-    let resp = runtime.process(&mut ctx, prompt).await.ok()?;
-    let AgentResponse::Text(text) = resp else {
-        return None;
-    };
-    let parsed: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
-    if !parsed.get("spawn")?.as_bool()? {
-        return None;
-    }
-    let goal = parsed.get("goal")?.as_str()?.trim();
-    if goal.is_empty() {
-        None
-    } else {
-        Some(goal.to_string())
-    }
-}
-
 fn is_affirmative_approval(text: &str) -> bool {
     let t = text.trim().to_lowercase();
     matches!(
@@ -1715,22 +1933,16 @@ fn format_pending_approvals(pending: &[unly_agent::context::PendingApproval]) ->
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            let risk_icon = match p.risk_level.as_str() {
-                "Dangerous" => "🔴",
-                "Privileged" => "🟡",
-                _ => "🟢",
-            };
             let risk_label = match p.risk_level.as_str() {
-                "Dangerous" => "DANGEROUS — irreversible or destructive",
-                "Privileged" => "PRIVILEGED — mutating or external action",
-                _ => "SAFE — read-only",
+                "Dangerous" => "dangerous (destructive or irreversible)",
+                "Privileged" => "privileged (mutating or external action)",
+                _ => "safe (read-only)",
             };
 
             let detail = build_approval_detail(&p.tool_name, &p.args);
             format!(
-                "<b>{}. {} {} ({})</b>\n{}",
+                "<b>{}. {} ({})</b>\n{}",
                 i + 1,
-                risk_icon,
                 escape_html(&p.tool_name),
                 risk_label,
                 detail
@@ -1745,10 +1957,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
     match tool_name {
         "bash" | "shell" => {
             if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                let mode = args
-                    .get("mode")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("run");
+                let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("run");
                 let mode_label = match mode {
                     "start" => " (background)",
                     "status" => " (check status)",
@@ -1768,13 +1977,19 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown path>");
-            let append = args.get("append").and_then(|v| v.as_bool()).unwrap_or(false);
+            let append = args
+                .get("append")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let action = if append { "Append to" } else { "Overwrite" };
             let content_preview = args
                 .get("content")
                 .and_then(|v| v.as_str())
                 .map(|c| {
-                    let preview = c.chars().take(APPROVAL_PREVIEW_MAX_CHARS).collect::<String>();
+                    let preview = c
+                        .chars()
+                        .take(APPROVAL_PREVIEW_MAX_CHARS)
+                        .collect::<String>();
                     if c.len() > APPROVAL_PREVIEW_MAX_CHARS {
                         format!("{}…", preview)
                     } else {
@@ -1783,7 +1998,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "  Action: {} file (MUTATING)\n  Path: <code>{}</code>\n  Preview: <code>{}</code>",
+                "  Action: {} file\n  Path: <code>{}</code>\n  Preview: <code>{}</code>",
                 action,
                 escape_html(path),
                 escape_html(&content_preview)
@@ -1794,14 +2009,17 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown path>");
-            let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+            let recursive = args
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let scope = if recursive {
                 "recursively (directory + all contents)"
             } else {
                 "single file or empty directory"
             };
             format!(
-                "  Action: DELETE {} — IRREVERSIBLE\n  Target: <code>{}</code>",
+                "  Action: Delete {}\n  Target: <code>{}</code>",
                 scope,
                 escape_html(path)
             )
@@ -1831,7 +2049,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unknown>");
             format!(
-                "  Action: Move/rename (MUTATING)\n  From: <code>{}</code>\n  To: <code>{}</code>",
+                "  Action: Move or rename\n  From: <code>{}</code>\n  To: <code>{}</code>",
                 escape_html(src),
                 escape_html(dst)
             )
@@ -1845,7 +2063,10 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("body")
                 .map(|b| {
                     let s = b.to_string();
-                    let preview = s.chars().take(APPROVAL_BODY_PREVIEW_MAX_CHARS).collect::<String>();
+                    let preview = s
+                        .chars()
+                        .take(APPROVAL_BODY_PREVIEW_MAX_CHARS)
+                        .collect::<String>();
                     if s.len() > APPROVAL_BODY_PREVIEW_MAX_CHARS {
                         format!("{}…", preview)
                     } else {
@@ -1854,7 +2075,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 })
                 .unwrap_or_default();
             format!(
-                "  Action: HTTP POST — external network request\n  URL: <code>{}</code>\n  Body: <code>{}</code>",
+                "  Action: Send HTTP POST request\n  URL: <code>{}</code>\n  Body: <code>{}</code>",
                 escape_html(url),
                 escape_html(&body_preview)
             )
@@ -1869,7 +2090,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("default");
             format!(
-                "  Action: Spawn background subagent with full permissions\n  Task: {}\n  Model: {}",
+                "  Action: Start background subagent\n  Task: {}\n  Model: {}",
                 escape_html(task),
                 escape_html(model)
             )
@@ -1879,18 +2100,12 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let name = args
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let cron = args
                 .get("cron_expression")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let task = args
-                .get("task")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
             let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
             match action {
                 "create" => format!(
@@ -1900,7 +2115,7 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                     escape_html(task)
                 ),
                 "delete" => format!(
-                    "  Action: Delete cron job (IRREVERSIBLE)\n  Job ID: <code>{}</code>",
+                    "  Action: Delete scheduled cron job\n  Job ID: <code>{}</code>",
                     escape_html(id)
                 ),
                 _ => format!(
@@ -1920,7 +2135,10 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
                         .map(|(k, v)| {
                             let val = match v {
                                 serde_json::Value::String(s) => {
-                                    let preview = s.chars().take(APPROVAL_PREVIEW_MAX_CHARS).collect::<String>();
+                                    let preview = s
+                                        .chars()
+                                        .take(APPROVAL_PREVIEW_MAX_CHARS)
+                                        .collect::<String>();
                                     if s.len() > APPROVAL_PREVIEW_MAX_CHARS {
                                         format!("{}…", preview)
                                     } else {
@@ -1947,15 +2165,18 @@ fn build_approval_detail(tool_name: &str, args: &serde_json::Value) -> String {
 fn format_approval_prompt(pending: &[unly_agent::context::PendingApproval]) -> String {
     let count = pending.len();
     let header = if count == 1 {
-        "⚠️ <b>Agent Action Requires Approval</b>\n\nThe agent wants to execute the following action:".to_string()
+        "<b>Approval required</b>\n\nPending action:".to_string()
     } else {
         format!(
-            "⚠️ <b>Agent Actions Require Approval</b>\n\nThe agent wants to execute <b>{}</b> actions:",
+            "<b>Approval required</b>\n\nPending actions: <b>{}</b>",
             count
         )
     };
     let details = format_pending_approvals(pending);
-    format!("{}\n\n{}\n\nApprove or deny below.", header, details)
+    format!(
+        "{}\n\n{}\n\nUse Approve or Deny to continue.",
+        header, details
+    )
 }
 
 fn escape_html(s: &str) -> String {
@@ -2405,6 +2626,7 @@ struct SubagentDetailRow {
     goal: Option<String>,
     model: Option<String>,
     updated_at: Option<String>,
+    result: Option<String>,
 }
 
 fn format_subagent_row_html(s: &SubagentStatusRow) -> String {
@@ -2564,6 +2786,54 @@ async fn send_response_text(
     Ok(())
 }
 
+async fn send_media(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    kind: &MediaKind,
+    path: &str,
+    caption: Option<&str>,
+) -> Result<(), teloxide::RequestError> {
+    let input = InputFile::file(path.to_string());
+    match kind {
+        MediaKind::Photo => {
+            let req = bot.send_photo(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+        MediaKind::Document => {
+            let req = bot.send_document(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn drain_pending_media(
+    bot: &Bot,
+    chat_id: teloxide::types::ChatId,
+    ctx: &mut AgentContext,
+) -> Result<(), teloxide::RequestError> {
+    let pending = std::mem::take(&mut ctx.pending_media);
+    for media in pending {
+        send_media(
+            bot,
+            chat_id,
+            &media.kind,
+            &media.path,
+            media.caption.as_deref(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 fn build_boot_summary() -> String {
     let boot_path = workspace::boot_path();
     let raw = std::fs::read_to_string(boot_path).unwrap_or_default();
@@ -2632,8 +2902,20 @@ async fn wait_and_notify_subagent_result(
         let status = manager.subagent_status(&subagent_id).await;
         match status {
             Some(s) if s == "completed" => {
+                let result_text = manager
+                    .subagent_outcome(&subagent_id)
+                    .await
+                    .and_then(|(_, r)| r)
+                    .unwrap_or_else(|| "No result payload.".to_string());
                 let _ = bot
-                    .send_message(chat_id, format!("Subagent {} completed.", subagent_id))
+                    .send_message(
+                        chat_id,
+                        format!(
+                            "Subagent {} completed.\nResult:\n{}",
+                            subagent_id,
+                            truncate_for_message(&result_text, 3200)
+                        ),
+                    )
                     .await;
                 return;
             }
@@ -2646,6 +2928,14 @@ async fn wait_and_notify_subagent_result(
             _ => {}
         }
     }
+}
+
+fn truncate_for_message(text: &str, max_chars: usize) -> String {
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
 }
 
 async fn resolve_telegram_chat_id(db: &Database, chat_id: ChatId) -> Option<i64> {

@@ -1,16 +1,18 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config, workspace};
+use unly_core::provider::Provider;
 use unly_db::Database;
 use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::copilot::{CopilotProvider, DevicePollResult};
+use unly_providers::openai_compat::OpenAiCompatProvider;
 use unly_telegram::{SessionStore, TelegramBot};
 
 use crate::{
@@ -103,6 +105,9 @@ pub enum Commands {
         /// Only print whether an update is available without installing it.
         #[arg(long)]
         check: bool,
+        /// GitHub repository in format owner/repo.
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -197,11 +202,6 @@ impl Cli {
                     Some(audit.clone()),
                 );
                 let sessions = SessionStore::new();
-                if config.scheduler.enabled {
-                    tokio::spawn(async move {
-                        scheduler.run().await;
-                    });
-                }
 
                 let config_arc = Arc::new(config);
                 let bot = Arc::new(TelegramBot::new(
@@ -212,6 +212,16 @@ impl Cli {
                     db.clone(),
                     audit.clone(),
                 ));
+
+                // Restore persisted cron jobs AFTER TelegramBot::new() has
+                // registered the cron executor, then start the scheduler.
+                if config_arc.scheduler.enabled {
+                    unly_tools::builtin::restore_jobs_from_db(&db, &scheduler).await;
+                    let scheduler_for_spawn = scheduler.clone();
+                    tokio::spawn(async move {
+                        scheduler_for_spawn.run().await;
+                    });
+                }
 
                 info!("all subsystems initialized - starting Telegram bot");
                 audit.success("startup", "system", "start");
@@ -438,9 +448,8 @@ impl Cli {
                 PluginCommands::Install { path } => {
                     let config = load_config(&config_path).unwrap_or_else(|_| default_config());
                     let skills_dir = &config.plugins.skills_dir;
-                    let src = std::fs::canonicalize(&path).with_context(|| {
-                        format!("path does not exist: {}", path.display())
-                    })?;
+                    let src = std::fs::canonicalize(&path)
+                        .with_context(|| format!("path does not exist: {}", path.display()))?;
                     match SkillLoader::install(&src, skills_dir) {
                         Ok(name) => {
                             println!("Skill '{}' installed successfully.", name);
@@ -613,26 +622,23 @@ impl Cli {
                 Ok(())
             }
 
-            Commands::Uninstall { skip } => run_uninstall_wizard(skip).await,
+            Commands::Uninstall { skip } => run_uninstall_wizard(skip, &config_path).await,
 
-            Commands::Update { check } => {
+            Commands::Update { check, repo } => {
                 if check {
-                    match self_update::check_update().await {
+                    match self_update::check_update(repo.as_deref()).await {
                         Ok(Some((current, latest, url))) => {
                             println!("Update available: v{} → v{}", current, latest);
                             println!("Release: {}", url);
                             println!("\nRun `unly update` to install.");
                         }
                         Ok(None) => {
-                            println!(
-                                "Already up-to-date (v{}).",
-                                env!("CARGO_PKG_VERSION")
-                            );
+                            println!("Already up-to-date (v{}).", env!("CARGO_PKG_VERSION"));
                         }
                         Err(e) => bail!("update check failed: {}", e),
                     }
                 } else {
-                    self_update::perform_update()
+                    self_update::perform_update(repo.as_deref())
                         .await
                         .context("self-update failed")?;
                 }
@@ -654,7 +660,7 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     if config_path.exists() {
         let overwrite = Confirm::with_theme(&theme)
             .with_prompt(format!(
-                "Config already exists at {}. Overwrite?",
+                "Config already exists at {}. Overwrite and reset workspace data?",
                 config_path.display()
             ))
             .default(false)
@@ -663,11 +669,18 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             println!("Setup cancelled. Existing config unchanged.");
             return Ok(());
         }
-        if let Err(e) = purge_subagents_from_existing_config(config_path).await {
-            println!(
-                "Warning: failed to clear subagents before config rewrite: {}",
-                e
-            );
+        let workspace_dir = workspace::workspace_dir();
+        if workspace_dir.exists() {
+            std::fs::remove_dir_all(&workspace_dir).with_context(|| {
+                format!(
+                    "removing existing workspace for overwrite: {}",
+                    workspace_dir.display()
+                )
+            })?;
+            println!("Existing workspace removed: {}", workspace_dir.display());
+        } else if config_path.exists() {
+            remove_path_if_exists(config_path)
+                .with_context(|| format!("removing existing config {}", config_path.display()))?;
         }
     }
 
@@ -742,6 +755,14 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             // Copilot - already the default
             config.providers.copilot.enabled = true;
             config.providers.default_provider = "copilot".to_string();
+            let cp = CopilotProvider::new(
+                config.providers.copilot.github_client_id.clone(),
+                config.providers.copilot.token_cache_path.clone(),
+                config.providers.copilot.copilot_api_url.clone(),
+            );
+            authenticate_copilot(&cp, &config.providers.copilot.token_cache_path).await?;
+            config.providers.default_model =
+                select_model_from_provider(&theme, "GitHub Copilot", &cp, "gpt-4o").await?;
         }
         1 => {
             // OpenAI-compatible
@@ -752,10 +773,11 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             let api_key: String = Input::with_theme(&theme)
                 .with_prompt("API key")
                 .interact_text()?;
-            let model: String = Input::with_theme(&theme)
-                .with_prompt("Default model ID")
-                .default("gpt-4o".to_string())
-                .interact_text()?;
+            let provider =
+                OpenAiCompatProvider::new("openai", base_url.clone(), api_key.clone(), Vec::new());
+            let model =
+                select_model_from_provider(&theme, "OpenAI-compatible API", &provider, "gpt-4o")
+                    .await?;
 
             config.providers.copilot.enabled = false;
             config
@@ -773,10 +795,14 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         }
         2 => {
             // Local / Ollama
-            let model: String = Input::with_theme(&theme)
-                .with_prompt("Ollama model name")
-                .default("llama3.2".to_string())
-                .interact_text()?;
+            let provider = OpenAiCompatProvider::new(
+                "local",
+                "http://localhost:11434/v1",
+                "ollama",
+                Vec::new(),
+            );
+            let model =
+                select_model_from_provider(&theme, "Local / Ollama", &provider, "llama3.2").await?;
 
             config.providers.copilot.enabled = false;
             config
@@ -849,53 +875,6 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         println!("Boot file created: {}", boot_path.display());
     }
 
-    if provider_idx == 0 {
-        let cp = CopilotProvider::new(
-            config.providers.copilot.github_client_id.clone(),
-            config.providers.copilot.token_cache_path.clone(),
-            config.providers.copilot.copilot_api_url.clone(),
-        );
-        println!("\nStarting GitHub Copilot authentication...");
-        let state = cp
-            .start_device_flow()
-            .await
-            .map_err(|e| anyhow::anyhow!("device flow start failed: {}", e))?;
-        println!("Open this URL: {}", state.verification_uri);
-        println!("Enter code: {}", state.user_code);
-        println!("Waiting for authorization...");
-        let poll_interval = Duration::from_secs(state.interval.max(5));
-        let timeout = Duration::from_secs(state.expires_in);
-        let start = std::time::Instant::now();
-        loop {
-            if start.elapsed() > timeout {
-                bail!("device flow timed out");
-            }
-            tokio::time::sleep(poll_interval).await;
-            match cp.poll_device_flow(&state).await {
-                Ok(DevicePollResult::Authorized) => {
-                    println!("Authenticated with GitHub Copilot.");
-                    println!(
-                        "Token cached at: {}",
-                        config.providers.copilot.token_cache_path.display()
-                    );
-                    break;
-                }
-                Ok(DevicePollResult::Pending) => {
-                    print!(".");
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
-                }
-                Ok(DevicePollResult::SlowDown) => {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-                Ok(DevicePollResult::Denied) => bail!("authorization was denied"),
-                Ok(DevicePollResult::Expired) => bail!("device code expired - please try again"),
-                Ok(DevicePollResult::Error(e)) => bail!("authorization error: {}", e),
-                Err(e) => bail!("polling error: {}", e),
-            }
-        }
-    }
-
     println!("\nConfiguration written to: {}", config_path.display());
     println!("\nNext steps:");
     println!("  1. Run: unly start");
@@ -903,10 +882,158 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run_uninstall_wizard(skip: bool) -> Result<()> {
+async fn authenticate_copilot(cp: &CopilotProvider, token_cache_path: &Path) -> Result<()> {
+    println!("\nStarting GitHub Copilot authentication...");
+    let state = cp
+        .start_device_flow()
+        .await
+        .map_err(|e| anyhow::anyhow!("device flow start failed: {}", e))?;
+    println!("Open this URL: {}", state.verification_uri);
+    println!("Enter code: {}", state.user_code);
+    println!("Waiting for authorization...");
+    let poll_interval = Duration::from_secs(state.interval.max(5));
+    let timeout = Duration::from_secs(state.expires_in);
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            bail!("device flow timed out");
+        }
+        tokio::time::sleep(poll_interval).await;
+        match cp.poll_device_flow(&state).await {
+            Ok(DevicePollResult::Authorized) => {
+                println!("Authenticated with GitHub Copilot.");
+                println!("Token cached at: {}", token_cache_path.display());
+                break;
+            }
+            Ok(DevicePollResult::Pending) => {
+                print!(".");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
+            Ok(DevicePollResult::SlowDown) => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            Ok(DevicePollResult::Denied) => bail!("authorization was denied"),
+            Ok(DevicePollResult::Expired) => bail!("device code expired - please try again"),
+            Ok(DevicePollResult::Error(e)) => bail!("authorization error: {}", e),
+            Err(e) => bail!("polling error: {}", e),
+        }
+    }
+    Ok(())
+}
+
+async fn select_model_from_provider(
+    theme: &ColorfulTheme,
+    provider_label: &str,
+    provider: &dyn Provider,
+    fallback_default: &str,
+) -> Result<String> {
+    println!("Fetching available models for {}...", provider_label);
+    let model_ids = match provider.list_models().await {
+        Ok(models) => {
+            let mut ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+            ids.retain(|id| !id.trim().is_empty());
+            ids.sort_by_key(|a| a.to_lowercase());
+            ids.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+            let filtered_ids: Vec<String> = ids
+                .iter()
+                .filter(|id| !is_non_chat_model(id))
+                .cloned()
+                .collect();
+            if !filtered_ids.is_empty() {
+                ids = filtered_ids;
+            }
+            ids.sort_by(|a, b| {
+                model_rank(a)
+                    .cmp(&model_rank(b))
+                    .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+            });
+            ids
+        }
+        Err(e) => {
+            println!(
+                "Could not fetch model list automatically ({}). You can enter the model manually.",
+                e
+            );
+            Vec::new()
+        }
+    };
+
+    if model_ids.is_empty() {
+        let model: String = Input::with_theme(theme)
+            .with_prompt("Default model ID")
+            .default(fallback_default.to_string())
+            .interact_text()?;
+        return Ok(model);
+    }
+
+    println!("Found {} models.", model_ids.len());
+    let display_models: Vec<String> = model_ids
+        .iter()
+        .map(|id| {
+            if id == fallback_default {
+                format!("{} (recommended)", id)
+            } else {
+                id.clone()
+            }
+        })
+        .collect();
+
+    let default_idx = model_ids
+        .iter()
+        .position(|m| m == fallback_default)
+        .unwrap_or(0);
+    let chosen_idx = Select::with_theme(theme)
+        .with_prompt("Choose a default model")
+        .items(&display_models)
+        .default(default_idx)
+        .interact()?;
+    Ok(model_ids[chosen_idx].clone())
+}
+
+fn is_non_chat_model(model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    id.contains("embedding")
+        || id.contains("moderation")
+        || id.contains("whisper")
+        || id.contains("tts")
+        || id.contains("audio")
+        || id.contains("transcribe")
+}
+
+fn model_rank(model_id: &str) -> u8 {
+    let id = model_id.to_lowercase();
+    if id.starts_with("gpt-5") {
+        0
+    } else if id.starts_with("claude-opus") {
+        1
+    } else if id.starts_with("claude-sonnet") {
+        2
+    } else if id.starts_with("claude") {
+        3
+    } else if id.starts_with("o3") {
+        4
+    } else if id.starts_with("o1") {
+        5
+    } else if id.starts_with("gpt-4.1") || id.starts_with("gpt-4o") || id.starts_with("gpt-4") {
+        6
+    } else if id.starts_with("llama") {
+        7
+    } else if id.starts_with("qwen") {
+        8
+    } else if id.starts_with("mistral") {
+        9
+    } else {
+        20
+    }
+}
+
+async fn run_uninstall_wizard(skip: bool, config_path: &Path) -> Result<()> {
     let theme = ColorfulTheme::default();
     let workspace_dir = workspace::workspace_dir();
-    let config_path = workspace::default_config_path();
+    let binary_path = cargo_unly_binary_path();
+    let custom_config_outside_workspace =
+        config_path.exists() && !config_path.starts_with(&workspace_dir);
 
     println!("\nUnly Uninstall");
     println!("{}", "=".repeat(50));
@@ -914,22 +1041,23 @@ async fn run_uninstall_wizard(skip: bool) -> Result<()> {
         "This will permanently delete the full Unly workspace:\n  {}",
         workspace_dir.display()
     );
-
-    if !workspace_dir.exists() {
-        println!("Workspace does not exist. Nothing to remove.");
-        return Ok(());
+    if custom_config_outside_workspace {
+        println!("And custom config file:\n  {}", config_path.display());
+    }
+    if binary_path.exists() {
+        println!("And binary:\n  {}", binary_path.display());
     }
 
-    if let Err(e) = purge_subagents_from_existing_config(&config_path).await {
-        println!(
-            "Warning: failed to clear subagents before workspace removal: {}",
-            e
-        );
+    let any_target_exists =
+        workspace_dir.exists() || custom_config_outside_workspace || binary_path.exists();
+    if !any_target_exists {
+        println!("Nothing to remove.");
+        return Ok(());
     }
 
     if !skip {
         let confirm_first = Confirm::with_theme(&theme)
-            .with_prompt("Are you sure you want to delete all Unly data?")
+            .with_prompt("Are you sure you want to delete selected Unly data?")
             .default(false)
             .interact()?;
         if !confirm_first {
@@ -950,34 +1078,47 @@ async fn run_uninstall_wizard(skip: bool) -> Result<()> {
         }
     }
 
-    std::fs::remove_dir_all(&workspace_dir)
-        .with_context(|| format!("removing workspace {}", workspace_dir.display()))?;
+    if workspace_dir.exists() {
+        std::fs::remove_dir_all(&workspace_dir)
+            .with_context(|| format!("removing workspace {}", workspace_dir.display()))?;
+        println!("Unly workspace removed: {}", workspace_dir.display());
+    }
+    if custom_config_outside_workspace {
+        remove_path_if_exists(config_path)
+            .with_context(|| format!("removing custom config {}", config_path.display()))?;
+        println!("Custom config removed: {}", config_path.display());
+    }
+    if binary_path.exists() {
+        remove_path_if_exists(&binary_path)
+            .with_context(|| format!("removing binary {}", binary_path.display()))?;
+        println!("Binary removed: {}", binary_path.display());
+    }
 
-    println!("Unly workspace removed: {}", workspace_dir.display());
     Ok(())
 }
 
-async fn purge_subagents_from_existing_config(config_path: &PathBuf) -> Result<()> {
-    if let Err(e) = workspace::clear_subagent_logs() {
-        println!("Warning: failed to clear subagent logs: {}", e);
-    }
-    if !config_path.exists() {
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if !path.exists() {
         return Ok(());
     }
-    let config = load_config(config_path)
-        .with_context(|| format!("loading config from {}", config_path.display()))?;
-    let db = Database::connect_with_config(&config.database)
-        .await
-        .context("connecting to database for subagent cleanup")?;
-    let deleted = db
-        .delete_all_subagents()
-        .await
-        .context("deleting subagents from database")?;
-    if deleted > 0 {
-        println!("Deleted {} subagent records.", deleted);
+    if path.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
     }
-    db.close().await;
     Ok(())
+}
+
+fn cargo_unly_binary_path() -> PathBuf {
+    let cargo_home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(".cargo")
+        });
+    cargo_home.join("bin").join("unly")
 }
 
 /// Print a table of skills or plugins to stdout.

@@ -80,6 +80,43 @@ impl Scheduler {
         }
     }
 
+    /// Register a job in memory only (no database upsert).
+    ///
+    /// Used when restoring persisted jobs on startup — the definition is
+    /// already in the DB so we only need to (re-)add it to the dispatch map.
+    pub async fn register_in_memory(&self, job: JobDefinition, callback: JobCallback) {
+        info!("restoring job from db: {} ({})", job.name, job.id);
+        self.jobs
+            .write()
+            .await
+            .insert(job.id.clone(), (job, callback));
+    }
+
+    pub async fn set_job_enabled(&self, id: &str, enabled: bool) -> bool {
+        let found = {
+            let mut jobs = self.jobs.write().await;
+            if let Some((job, _)) = jobs.get_mut(id) {
+                job.enabled = enabled;
+                true
+            } else {
+                false
+            }
+        };
+        if !enabled {
+            self.last_dispatched.write().await.remove(id);
+        }
+        found
+    }
+
+    /// Remove a registered job from in-memory dispatch tables.
+    pub async fn remove_job(&self, id: &str) -> bool {
+        let removed = self.jobs.write().await.remove(id).is_some();
+        if removed {
+            self.last_dispatched.write().await.remove(id);
+        }
+        removed
+    }
+
     /// Start the scheduler loop (runs indefinitely, should be spawned as a task).
     pub async fn run(self: Arc<Self>) {
         info!("scheduler started");
@@ -125,7 +162,7 @@ impl Scheduler {
                                             .get(id.as_str())
                                             .map(|last| *last < scheduled_at)
                                             .unwrap_or(true),
-                                Err(_) => {
+                                        Err(_) => {
                                             warn!(
                                                 job_id = %id,
                                                 "could not read last_dispatched map (lock contention); skipping job this tick"
@@ -176,7 +213,7 @@ impl Scheduler {
 
                             let run_row = JobRunRow {
                                 id: run_id,
-                                job_id,
+                                job_id: job_id.clone(),
                                 status,
                                 output,
                                 error,
@@ -187,6 +224,10 @@ impl Scheduler {
                             let repo = unly_db::repo::job::JobRepo::new(db.conn());
                             if let Err(e) = repo.insert_run(&run_row).await {
                                 warn!("failed to persist job run: {}", e);
+                            }
+                            // Update last_run_at on the job row.
+                            if let Err(e) = repo.update_last_run(&job_id, finished_at).await {
+                                warn!("failed to update last_run_at for job {}: {}", job_id, e);
                             }
                         });
                     }

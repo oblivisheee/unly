@@ -148,4 +148,22 @@ impl<'a> JobRepo<'a> {
         job_run::Entity::insert(active).exec(self.conn).await?;
         Ok(())
     }
+
+    /// Update the `last_run_at` timestamp on a job row.
+    pub async fn update_last_run(&self, id: &str, last_run: DateTime<Utc>) -> DbResult<()> {
+        let now = Utc::now();
+        job::Entity::update_many()
+            .col_expr(
+                job::Column::LastRunAt,
+                sea_orm::sea_query::Expr::value(last_run.to_rfc3339()),
+            )
+            .col_expr(
+                job::Column::UpdatedAt,
+                sea_orm::sea_query::Expr::value(now.to_rfc3339()),
+            )
+            .filter(job::Column::Id.eq(id))
+            .exec(self.conn)
+            .await?;
+        Ok(())
+    }
 }

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use cron::Schedule;
 use once_cell::sync::Lazy;
 use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
 use serde_json::{json, Value};
@@ -33,6 +34,7 @@ type CronRunner = Arc<
     dyn Fn(
             String,
             ChatId,
+            Option<i64>,
             String,
             String,
         ) -> std::pin::Pin<
@@ -174,9 +176,9 @@ impl Tool for CronJobTool {
                     "action":{"type":"string","enum":["create","list","enable","disable","run_now","delete"]},
                     "id":{"type":"string"},
                     "name":{"type":"string"},
-                    "cron_expression":{"type":"string"},
+                    "cron_expression":{"type":"string","description":"Cron schedule. Supports 5-field (min hour day month weekday) and 6-field (sec min hour day month weekday) formats."},
                     "task":{"type":"string"},
-                    "notify_mode":{"type":"string","enum":["silent","message"],"default":"silent"}
+                    "notify_mode":{"type":"string","enum":["silent","message"],"default":"message"}
                 },
                 "required":["action"]
             }),
@@ -220,6 +222,14 @@ impl Tool for CronJobTool {
                         ));
                     }
                 };
+                let cron_expression = normalize_cron_expression(&cron_expression);
+                if let Err(e) = Schedule::from_str(&cron_expression) {
+                    return Ok(ToolResult::error(
+                        ctx.tool_call_id.clone(),
+                        format!("invalid cron_expression '{}': {}", cron_expression, e),
+                        start.elapsed().as_millis() as u64,
+                    ));
+                }
                 let task = match args.get("task").and_then(|v| v.as_str()) {
                     Some(v) if !v.trim().is_empty() => v.trim().to_string(),
                     _ => {
@@ -233,12 +243,39 @@ impl Tool for CronJobTool {
                 let notify_mode = args
                     .get("notify_mode")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("silent")
+                    .unwrap_or("message")
                     .to_string();
+                if notify_mode != "message" && notify_mode != "silent" {
+                    return Ok(ToolResult::error(
+                        ctx.tool_call_id.clone(),
+                        "notify_mode must be one of: message, silent",
+                        start.elapsed().as_millis() as u64,
+                    ));
+                }
+                let backend = match self.db.db_type() {
+                    DbType::Postgres => DatabaseBackend::Postgres,
+                    DbType::Sqlite => DatabaseBackend::Sqlite,
+                };
+                let tg_stmt = Statement::from_string(
+                    backend,
+                    format!(
+                        "SELECT telegram_chat_id FROM chats WHERE id='{}' LIMIT 1",
+                        chat_id
+                    ),
+                );
+                let telegram_chat_id = self
+                    .db
+                    .conn()
+                    .query_one(tg_stmt)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|row| row.try_get::<i64>("", "telegram_chat_id").ok());
 
                 let payload = json!({
                     "task": task,
                     "chat_id": chat_id.to_string(),
+                    "telegram_chat_id": telegram_chat_id,
                     "notify_mode": notify_mode,
                 });
                 let def = JobDefinition::cron(id.clone(), name.clone(), cron_expression, payload);
@@ -265,7 +302,16 @@ impl Tool for CronJobTool {
                             .and_then(|v| v.as_str())
                             .unwrap_or("silent")
                             .to_string();
-                        exec(task, chat_id, notify_mode, "cron".to_string()).await
+                        let telegram_chat_id =
+                            payload.get("telegram_chat_id").and_then(|v| v.as_i64());
+                        exec(
+                            task,
+                            chat_id,
+                            telegram_chat_id,
+                            notify_mode,
+                            "cron".to_string(),
+                        )
+                        .await
                     })
                         as std::pin::Pin<
                             Box<
@@ -324,6 +370,11 @@ impl Tool for CronJobTool {
                     .execute(Statement::from_string(backend, sql))
                     .await
                     .map_err(|e| unly_core::Error::Database(e.to_string()))?;
+                if action == "enable" || action == "disable" {
+                    let _ = self.scheduler.set_job_enabled(id, action == "enable").await;
+                } else {
+                    let _ = self.scheduler.remove_job(id).await;
+                }
                 Ok(ToolResult::success(
                     ctx.tool_call_id.clone(),
                     json!({"status":"ok","action":action,"id":id}).to_string(),
@@ -380,6 +431,7 @@ impl Tool for CronJobTool {
                     .and_then(|v| v.as_str())
                     .unwrap_or("silent")
                     .to_string();
+                let telegram_chat_id = payload.get("telegram_chat_id").and_then(|v| v.as_i64());
                 let Some(exec) = CRON_EXECUTOR.read().ok().and_then(|g| g.clone()) else {
                     return Ok(ToolResult::error(
                         ctx.tool_call_id.clone(),
@@ -397,9 +449,15 @@ impl Tool for CronJobTool {
                         ));
                     }
                 };
-                let out = exec(task, chat_id, notify_mode, "manual".to_string())
-                    .await
-                    .unwrap_or_else(|e| format!("job run failed: {}", e));
+                let out = exec(
+                    task,
+                    chat_id,
+                    telegram_chat_id,
+                    notify_mode,
+                    "manual".to_string(),
+                )
+                .await
+                .unwrap_or_else(|e| format!("job run failed: {}", e));
                 Ok(ToolResult::success(
                     ctx.tool_call_id.clone(),
                     out,
@@ -425,13 +483,105 @@ pub fn scheduler_ref() -> Option<Arc<Scheduler>> {
     ACTIVE_SCHEDULER.read().ok().and_then(|g| g.clone())
 }
 
-pub fn build_notify_message(task: &str, trigger: &str, result: &str) -> String {
-    format!(
-        "Cron job executed ({})\nTask: {}\nResult: {}",
-        trigger, task, result
-    )
+/// Restore all enabled cron jobs from the database into the active scheduler.
+///
+/// Must be called **after** [`register_cron_executor`] so the callbacks can
+/// dispatch through the registered executor.  Jobs are registered in-memory
+/// only — the DB rows already exist and must not be duplicated.
+pub async fn restore_jobs_from_db(db: &Database, scheduler: &Arc<Scheduler>) {
+    use tracing::{info, warn};
+    let repo = unly_db::repo::job::JobRepo::new(db.conn());
+    let rows = match repo.list_enabled().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("scheduler: failed to load jobs from db on startup: {}", e);
+            return;
+        }
+    };
+    let total = rows.len();
+    let mut restored = 0usize;
+    for row in rows {
+        // Only restore cron-type jobs with an expression.
+        if row.job_type != "cron" {
+            continue;
+        }
+        let Some(cron_expr) = row.cron_expression.clone() else {
+            continue;
+        };
+        let def = unly_scheduler::JobDefinition {
+            id: row.id.clone(),
+            name: row.name.clone(),
+            description: row.description.clone(),
+            job_type: unly_scheduler::JobType::Cron,
+            cron_expression: Some(cron_expr),
+            payload: serde_json::from_str(&row.payload).unwrap_or_default(),
+            enabled: row.enabled,
+            retry_limit: row.retry_limit,
+        };
+        let cron_exec = CRON_EXECUTOR.read().ok().and_then(|g| g.clone());
+        let callback: unly_scheduler::JobCallback = Arc::new(move |payload: serde_json::Value| {
+            let cron_exec = cron_exec.clone();
+            Box::pin(async move {
+                let Some(exec) = cron_exec else {
+                    return Err("cron executor not initialized".to_string());
+                };
+                let task = payload
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let chat_raw = payload
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let chat_id =
+                    ChatId::from_str(chat_raw).map_err(|e| format!("invalid chat id: {}", e))?;
+                let notify_mode = payload
+                    .get("notify_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("silent")
+                    .to_string();
+                let telegram_chat_id = payload.get("telegram_chat_id").and_then(|v| v.as_i64());
+                exec(
+                    task,
+                    chat_id,
+                    telegram_chat_id,
+                    notify_mode,
+                    "cron".to_string(),
+                )
+                .await
+            })
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = std::result::Result<String, String>>
+                            + Send,
+                    >,
+                >
+        });
+        scheduler.register_in_memory(def, callback).await;
+        restored += 1;
+    }
+    info!(
+        "scheduler: restored {}/{} cron jobs from database",
+        restored, total
+    );
+}
+
+pub fn build_notify_message(_task: &str, _trigger: &str, result: &str) -> String {
+    result.to_string()
 }
 
 pub fn escape_sql(value: &str) -> String {
     value.replace('\'', "''")
+}
+
+fn normalize_cron_expression(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    // Accept 5-field standard cron by prepending seconds=0 to match runtime parser.
+    if parts.len() == 5 {
+        format!("0 {}", trimmed)
+    } else {
+        trimmed.to_string()
+    }
 }
