@@ -19,7 +19,7 @@ use unly_core::{
 ///
 /// IMPORTANT: This tool is Dangerous and always requires approval.
 /// The command must match the configured shell_allowlist policy.
-/// Executed via /bin/sh -lc with restricted environment.
+/// Executed via bash -lc with restricted environment.
 pub struct ShellTool {
     allowlist: Vec<String>,
     working_dir: Option<PathBuf>,
@@ -72,6 +72,20 @@ impl ShellTool {
             .as_str()
             .map(PathBuf::from)
             .or_else(|| self.working_dir.clone())
+    }
+
+    fn wrap_with_bashrc(command: &str) -> String {
+        format!(
+            "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi; {}",
+            command
+        )
+    }
+
+    fn wrap_bash_command(command: &str) -> String {
+        format!(
+            "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi; set -o pipefail; {}",
+            command
+        )
     }
 
     async fn execute_with_program(
@@ -238,9 +252,9 @@ impl Tool for ShellTool {
                     },
                 );
             }
-            let program = "/bin/sh".to_string();
-            let program_args = vec!["-lc".to_string()];
-            let command = command.to_string();
+            let program = "/usr/bin/env".to_string();
+            let program_args = vec!["bash".to_string(), "-lc".to_string()];
+            let command = Self::wrap_with_bashrc(command);
             let job_id_for_task = job_id.clone();
             tokio::spawn(async move {
                 let mut cmd = Command::new(program);
@@ -295,8 +309,16 @@ impl Tool for ShellTool {
                 start.elapsed().as_millis() as u64,
             ));
         }
+        let wrapped = Self::wrap_with_bashrc(command);
         Ok(self
-            .execute_with_program("/bin/sh", &["-lc"], command, working_dir, ctx, start)
+            .execute_with_program(
+                "/usr/bin/env",
+                &["bash", "-lc"],
+                &wrapped,
+                working_dir,
+                ctx,
+                start,
+            )
             .await)
     }
 }
@@ -384,7 +406,7 @@ impl Tool for BashTool {
                     },
                 );
             }
-            let wrapped = format!("set -o pipefail; {}", command);
+            let wrapped = ShellTool::wrap_bash_command(command);
             let job_id_for_task = job_id.clone();
             tokio::spawn(async move {
                 let mut cmd = Command::new("/usr/bin/env");
@@ -440,7 +462,7 @@ impl Tool for BashTool {
             ));
         }
         // Use a real bash invocation and pipefail for reliable exit behavior.
-        let wrapped = format!("set -o pipefail; {}", command);
+        let wrapped = ShellTool::wrap_bash_command(command);
         Ok(self
             .inner
             .execute_with_program(
@@ -452,5 +474,24 @@ impl Tool for BashTool {
                 start,
             )
             .await)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShellTool;
+
+    #[test]
+    fn wraps_shell_command_with_bashrc_source() {
+        let wrapped = ShellTool::wrap_with_bashrc("echo ok");
+        assert!(wrapped.starts_with("if [ -f ~/.bashrc ]; then source ~/.bashrc; fi;"));
+        assert!(wrapped.ends_with("echo ok"));
+    }
+
+    #[test]
+    fn wraps_bash_command_with_bashrc_and_pipefail() {
+        let wrapped = ShellTool::wrap_bash_command("echo ok");
+        assert!(wrapped.contains("source ~/.bashrc; fi; set -o pipefail;"));
+        assert!(wrapped.ends_with("echo ok"));
     }
 }
