@@ -14,7 +14,7 @@ Unly is a Rust-based platform that turns any Telegram chat into an agentic AI as
 - **Semantic memory** — remembers past conversations using vector similarity search (SQLite-backed, no external DB)
 - **Multi-provider LLM** — GitHub Copilot out of the box, plus any OpenAI-compatible API (OpenAI, Ollama, etc.)
 - **Agentic tool execution** — HTTP, extended file tools, git inspection, shell/bash, subagents, cron jobs
-- **Approval workflow** — manual approvals by default, with per-chat `/approval auto` and setup-time full-access mode
+- **Approval workflow** — manual approvals by default, with global `/approval auto|manual` and setup-time full-access mode
 - **Security by default** — allowlist-based access control, audit trail, secret redaction, and policy-gated tool risks
 - **Job scheduler** — cron-based background tasks
 - **Plugin system** — extend capabilities with your own Rust plugins
@@ -45,6 +45,26 @@ Before running, you will need:
 - A GitHub account with GitHub Copilot access *(or any OpenAI-compatible API key)*
 
 After the build completes, the onboarding wizard (`unly setup`) will guide you through the remaining steps.
+It now fetches available models from the selected provider and lets you pick a default model from the fetched list (with manual fallback if listing fails).
+
+## CLI Commands
+
+Common commands:
+
+```bash
+unly setup
+unly start
+unly validate
+unly doctor
+unly update --check
+unly update
+```
+
+Update command notes:
+- `unly update --check` — check if a newer release exists.
+- `unly update` — download and install the latest release binary.
+- `unly update --repo owner/repo` — check/install from a specific GitHub repository.
+- You can also set `UNLY_RELEASE_REPO=owner/repo`.
 
 ---
 
@@ -130,9 +150,10 @@ shell_allowlist                 = ["^ls(\\s|$)", "^pwd(\\s|$)", "^cat\\s+", "^ec
 ```
 
 Approval behavior:
-- `/approval manual` keeps explicit approve/deny flow for pending actions.
-- `/approval auto` auto-approves pending actions for that chat session.
+- `/approval manual` keeps explicit approve/deny flow for pending tool actions.
+- `/approval auto` auto-approves pending tool actions globally.
 - During `unly setup`, selecting full access disables approval prompts globally in config.
+- Manual/auto applies to tool execution flow, not to plain chat text.
 
 **Built-in tools and their risk level:**
 
@@ -152,7 +173,7 @@ Approval behavior:
 | `git_status` | Safe | `git status` output |
 | `git_log` | Safe | `git log` output |
 | `shell` / `bash` | Dangerous | Execute shell commands (allowlist-checked) |
-| `spawn_subagent` | Privileged | Delegate a task to a subagent |
+| `spawn_subagent` | Privileged | Delegate a task to a subagent (use only when user explicitly asks for delegation) |
 | `cron_job` | Privileged | Manage scheduled background jobs |
 
 ### Agent behaviour
@@ -201,14 +222,16 @@ Built-in plugin currently wired into runtime:
 | Command | Access | Description |
 |---------|--------|-------------|
 | `/start` | All | Begin a new session |
+| `/new` | All | Begin a new session |
 | `/help` | All | Show available commands |
 | `/status` | All | Current provider, model, and session info |
 | `/model <name>` | All | Switch to a different model |
 | `/provider <name>` | All | Switch to a different provider |
 | `/subagents` | All | Show active subagents and statuses |
+| `/spawn_subagent <task>` | All | Explicitly request a delegated subagent task |
 | `/approve` | All | Approve pending tool calls (manual mode) |
 | `/deny` | All | Deny pending tool calls (manual mode) |
-| `/approval <manual\\|auto>` | All | Switch per-chat approval mode |
+| `/approval <manual\\|auto>` | All | Switch global approval mode |
 | `/reset` | All | Clear conversation context |
 
 ---
@@ -231,6 +254,17 @@ unly-cli  (binary)
 ├── unly-config        TOML config loading with env overrides
 └── unly-core          Domain types, traits, errors (no I/O)
 ```
+
+### Release and self-update
+
+Repository includes a GitHub Actions workflow for mainline releases:
+- `.github/workflows/release-main.yml`
+- Trigger: `push` to `main` and manual `workflow_dispatch`
+- Builds release binaries for:
+  - `x86_64-unknown-linux-gnu`
+  - `x86_64-apple-darwin`
+  - `aarch64-apple-darwin`
+- Publishes GitHub Release assets consumed by `unly update`
 
 **Message flow:**
 

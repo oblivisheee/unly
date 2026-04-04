@@ -92,7 +92,6 @@ impl Scheduler {
             .insert(job.id.clone(), (job, callback));
     }
 
-
     pub async fn set_job_enabled(&self, id: &str, enabled: bool) -> bool {
         let found = {
             let mut jobs = self.jobs.write().await;

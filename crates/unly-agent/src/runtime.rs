@@ -135,8 +135,9 @@ impl AgentRuntime {
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
         let mut provider_retry_count = 0u32;
-        let preapproved_tools =
-            ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools);
+        let preapproved_tools = matches!(ctx.tool_approval_override, Some(true))
+            || (ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools));
+        let force_tool_approval = matches!(ctx.tool_approval_override, Some(false));
 
         let final_response = loop {
             ctx.trim_to(self.config.context_window_size);
@@ -225,7 +226,13 @@ impl AgentRuntime {
 
                     let result = self
                         .tool_registry
-                        .execute(&tc.function.name, args.clone(), tool_ctx, preapproved_tools)
+                        .execute(
+                            &tc.function.name,
+                            args.clone(),
+                            tool_ctx,
+                            preapproved_tools,
+                            force_tool_approval,
+                        )
                         .await;
 
                     match result {
@@ -412,8 +419,9 @@ impl AgentRuntime {
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
         let mut provider_retry_count = 0u32;
-        let preapproved_tools =
-            ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools);
+        let preapproved_tools = matches!(ctx.tool_approval_override, Some(true))
+            || (ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools));
+        let force_tool_approval = matches!(ctx.tool_approval_override, Some(false));
 
         loop {
             ctx.trim_to(self.config.context_window_size);
@@ -494,7 +502,13 @@ impl AgentRuntime {
 
                     let result = self
                         .tool_registry
-                        .execute(&tc.function.name, args.clone(), tool_ctx, preapproved_tools)
+                        .execute(
+                            &tc.function.name,
+                            args.clone(),
+                            tool_ctx,
+                            preapproved_tools,
+                            force_tool_approval,
+                        )
                         .await;
 
                     match result {
@@ -689,7 +703,13 @@ impl AgentRuntime {
 
             let result = self
                 .tool_registry
-                .execute(&approval.tool_name, approval.args.clone(), tool_ctx, true)
+                .execute(
+                    &approval.tool_name,
+                    approval.args.clone(),
+                    tool_ctx,
+                    true,
+                    false,
+                )
                 .await;
 
             let content = match result {

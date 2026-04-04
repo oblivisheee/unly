@@ -8,9 +8,11 @@ use tracing::info;
 
 use unly_audit::AuditLogger;
 use unly_config::{default_config, load_config, workspace};
+use unly_core::provider::Provider;
 use unly_db::Database;
 use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::copilot::{CopilotProvider, DevicePollResult};
+use unly_providers::openai_compat::OpenAiCompatProvider;
 use unly_telegram::{SessionStore, TelegramBot};
 
 use crate::{
@@ -103,6 +105,9 @@ pub enum Commands {
         /// Only print whether an update is available without installing it.
         #[arg(long)]
         check: bool,
+        /// GitHub repository in format owner/repo.
+        #[arg(long)]
+        repo: Option<String>,
     },
 }
 
@@ -619,9 +624,9 @@ impl Cli {
 
             Commands::Uninstall { skip } => run_uninstall_wizard(skip, &config_path).await,
 
-            Commands::Update { check } => {
+            Commands::Update { check, repo } => {
                 if check {
-                    match self_update::check_update().await {
+                    match self_update::check_update(repo.as_deref()).await {
                         Ok(Some((current, latest, url))) => {
                             println!("Update available: v{} → v{}", current, latest);
                             println!("Release: {}", url);
@@ -633,7 +638,7 @@ impl Cli {
                         Err(e) => bail!("update check failed: {}", e),
                     }
                 } else {
-                    self_update::perform_update()
+                    self_update::perform_update(repo.as_deref())
                         .await
                         .context("self-update failed")?;
                 }
@@ -750,6 +755,14 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             // Copilot - already the default
             config.providers.copilot.enabled = true;
             config.providers.default_provider = "copilot".to_string();
+            let cp = CopilotProvider::new(
+                config.providers.copilot.github_client_id.clone(),
+                config.providers.copilot.token_cache_path.clone(),
+                config.providers.copilot.copilot_api_url.clone(),
+            );
+            authenticate_copilot(&cp, &config.providers.copilot.token_cache_path).await?;
+            config.providers.default_model =
+                select_model_from_provider(&theme, "GitHub Copilot", &cp, "gpt-4o").await?;
         }
         1 => {
             // OpenAI-compatible
@@ -760,10 +773,11 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
             let api_key: String = Input::with_theme(&theme)
                 .with_prompt("API key")
                 .interact_text()?;
-            let model: String = Input::with_theme(&theme)
-                .with_prompt("Default model ID")
-                .default("gpt-4o".to_string())
-                .interact_text()?;
+            let provider =
+                OpenAiCompatProvider::new("openai", base_url.clone(), api_key.clone(), Vec::new());
+            let model =
+                select_model_from_provider(&theme, "OpenAI-compatible API", &provider, "gpt-4o")
+                    .await?;
 
             config.providers.copilot.enabled = false;
             config
@@ -781,10 +795,14 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         }
         2 => {
             // Local / Ollama
-            let model: String = Input::with_theme(&theme)
-                .with_prompt("Ollama model name")
-                .default("llama3.2".to_string())
-                .interact_text()?;
+            let provider = OpenAiCompatProvider::new(
+                "local",
+                "http://localhost:11434/v1",
+                "ollama",
+                Vec::new(),
+            );
+            let model =
+                select_model_from_provider(&theme, "Local / Ollama", &provider, "llama3.2").await?;
 
             config.providers.copilot.enabled = false;
             config
@@ -857,58 +875,157 @@ async fn run_setup_wizard(config_path: &PathBuf) -> Result<()> {
         println!("Boot file created: {}", boot_path.display());
     }
 
-    if provider_idx == 0 {
-        let cp = CopilotProvider::new(
-            config.providers.copilot.github_client_id.clone(),
-            config.providers.copilot.token_cache_path.clone(),
-            config.providers.copilot.copilot_api_url.clone(),
-        );
-        println!("\nStarting GitHub Copilot authentication...");
-        let state = cp
-            .start_device_flow()
-            .await
-            .map_err(|e| anyhow::anyhow!("device flow start failed: {}", e))?;
-        println!("Open this URL: {}", state.verification_uri);
-        println!("Enter code: {}", state.user_code);
-        println!("Waiting for authorization...");
-        let poll_interval = Duration::from_secs(state.interval.max(5));
-        let timeout = Duration::from_secs(state.expires_in);
-        let start = std::time::Instant::now();
-        loop {
-            if start.elapsed() > timeout {
-                bail!("device flow timed out");
-            }
-            tokio::time::sleep(poll_interval).await;
-            match cp.poll_device_flow(&state).await {
-                Ok(DevicePollResult::Authorized) => {
-                    println!("Authenticated with GitHub Copilot.");
-                    println!(
-                        "Token cached at: {}",
-                        config.providers.copilot.token_cache_path.display()
-                    );
-                    break;
-                }
-                Ok(DevicePollResult::Pending) => {
-                    print!(".");
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
-                }
-                Ok(DevicePollResult::SlowDown) => {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                }
-                Ok(DevicePollResult::Denied) => bail!("authorization was denied"),
-                Ok(DevicePollResult::Expired) => bail!("device code expired - please try again"),
-                Ok(DevicePollResult::Error(e)) => bail!("authorization error: {}", e),
-                Err(e) => bail!("polling error: {}", e),
-            }
-        }
-    }
-
     println!("\nConfiguration written to: {}", config_path.display());
     println!("\nNext steps:");
     println!("  1. Run: unly start");
 
     Ok(())
+}
+
+async fn authenticate_copilot(cp: &CopilotProvider, token_cache_path: &Path) -> Result<()> {
+    println!("\nStarting GitHub Copilot authentication...");
+    let state = cp
+        .start_device_flow()
+        .await
+        .map_err(|e| anyhow::anyhow!("device flow start failed: {}", e))?;
+    println!("Open this URL: {}", state.verification_uri);
+    println!("Enter code: {}", state.user_code);
+    println!("Waiting for authorization...");
+    let poll_interval = Duration::from_secs(state.interval.max(5));
+    let timeout = Duration::from_secs(state.expires_in);
+    let start = std::time::Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            bail!("device flow timed out");
+        }
+        tokio::time::sleep(poll_interval).await;
+        match cp.poll_device_flow(&state).await {
+            Ok(DevicePollResult::Authorized) => {
+                println!("Authenticated with GitHub Copilot.");
+                println!("Token cached at: {}", token_cache_path.display());
+                break;
+            }
+            Ok(DevicePollResult::Pending) => {
+                print!(".");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
+            Ok(DevicePollResult::SlowDown) => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            Ok(DevicePollResult::Denied) => bail!("authorization was denied"),
+            Ok(DevicePollResult::Expired) => bail!("device code expired - please try again"),
+            Ok(DevicePollResult::Error(e)) => bail!("authorization error: {}", e),
+            Err(e) => bail!("polling error: {}", e),
+        }
+    }
+    Ok(())
+}
+
+async fn select_model_from_provider(
+    theme: &ColorfulTheme,
+    provider_label: &str,
+    provider: &dyn Provider,
+    fallback_default: &str,
+) -> Result<String> {
+    println!("Fetching available models for {}...", provider_label);
+    let model_ids = match provider.list_models().await {
+        Ok(models) => {
+            let mut ids: Vec<String> = models.into_iter().map(|m| m.id).collect();
+            ids.retain(|id| !id.trim().is_empty());
+            ids.sort_by_key(|a| a.to_lowercase());
+            ids.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+            let filtered_ids: Vec<String> = ids
+                .iter()
+                .filter(|id| !is_non_chat_model(id))
+                .cloned()
+                .collect();
+            if !filtered_ids.is_empty() {
+                ids = filtered_ids;
+            }
+            ids.sort_by(|a, b| {
+                model_rank(a)
+                    .cmp(&model_rank(b))
+                    .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+            });
+            ids
+        }
+        Err(e) => {
+            println!(
+                "Could not fetch model list automatically ({}). You can enter the model manually.",
+                e
+            );
+            Vec::new()
+        }
+    };
+
+    if model_ids.is_empty() {
+        let model: String = Input::with_theme(theme)
+            .with_prompt("Default model ID")
+            .default(fallback_default.to_string())
+            .interact_text()?;
+        return Ok(model);
+    }
+
+    println!("Found {} models.", model_ids.len());
+    let display_models: Vec<String> = model_ids
+        .iter()
+        .map(|id| {
+            if id == fallback_default {
+                format!("{} (recommended)", id)
+            } else {
+                id.clone()
+            }
+        })
+        .collect();
+
+    let default_idx = model_ids
+        .iter()
+        .position(|m| m == fallback_default)
+        .unwrap_or(0);
+    let chosen_idx = Select::with_theme(theme)
+        .with_prompt("Choose a default model")
+        .items(&display_models)
+        .default(default_idx)
+        .interact()?;
+    Ok(model_ids[chosen_idx].clone())
+}
+
+fn is_non_chat_model(model_id: &str) -> bool {
+    let id = model_id.to_lowercase();
+    id.contains("embedding")
+        || id.contains("moderation")
+        || id.contains("whisper")
+        || id.contains("tts")
+        || id.contains("audio")
+        || id.contains("transcribe")
+}
+
+fn model_rank(model_id: &str) -> u8 {
+    let id = model_id.to_lowercase();
+    if id.starts_with("gpt-5") {
+        0
+    } else if id.starts_with("claude-opus") {
+        1
+    } else if id.starts_with("claude-sonnet") {
+        2
+    } else if id.starts_with("claude") {
+        3
+    } else if id.starts_with("o3") {
+        4
+    } else if id.starts_with("o1") {
+        5
+    } else if id.starts_with("gpt-4.1") || id.starts_with("gpt-4o") || id.starts_with("gpt-4") {
+        6
+    } else if id.starts_with("llama") {
+        7
+    } else if id.starts_with("qwen") {
+        8
+    } else if id.starts_with("mistral") {
+        9
+    } else {
+        20
+    }
 }
 
 async fn run_uninstall_wizard(skip: bool, config_path: &Path) -> Result<()> {

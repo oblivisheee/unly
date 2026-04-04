@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-const RELEASES_URL: &str = "https://api.github.com/repos/oblivisheee/unly/releases/latest";
+const DEFAULT_RELEASE_REPO: &str = "oblivisheee/unly";
 const USER_AGENT: &str = concat!("unly/", env!("CARGO_PKG_VERSION"));
 
 // ── GitHub API types ──────────────────────────────────────────────────────────
@@ -30,8 +30,8 @@ struct GithubAsset {
 ///
 /// Returns `Some((current, latest, release_url))` when an update exists, or
 /// `None` when the running version is already the latest.
-pub async fn check_update() -> Result<Option<(String, String, String)>> {
-    let release = fetch_latest_release().await?;
+pub async fn check_update(repo_override: Option<&str>) -> Result<Option<(String, String, String)>> {
+    let release = fetch_latest_release(repo_override).await?;
 
     let current = env!("CARGO_PKG_VERSION").to_string();
     let latest = release.tag_name.trim_start_matches('v').to_string();
@@ -47,8 +47,8 @@ pub async fn check_update() -> Result<Option<(String, String, String)>> {
 /// the running executable.
 ///
 /// If already up-to-date, prints a message and returns without doing anything.
-pub async fn perform_update() -> Result<()> {
-    let release = fetch_latest_release().await?;
+pub async fn perform_update(repo_override: Option<&str>) -> Result<()> {
+    let release = fetch_latest_release(repo_override).await?;
 
     let current = env!("CARGO_PKG_VERSION");
     let latest = release.tag_name.trim_start_matches('v');
@@ -115,17 +115,45 @@ pub async fn perform_update() -> Result<()> {
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-async fn fetch_latest_release() -> Result<GithubRelease> {
-    build_client()?
-        .get(RELEASES_URL)
+async fn fetch_latest_release(repo_override: Option<&str>) -> Result<GithubRelease> {
+    let repo = release_repo(repo_override)?;
+    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
+    let response = build_client()?
+        .get(&url)
         .send()
         .await
-        .context("fetching latest release metadata from GitHub")?
+        .with_context(|| format!("fetching latest release metadata from {}", url))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!(
+            "no published release found for repository '{}'.\n\
+             If this is your fork, create a GitHub Release first or run with --repo <owner/repo>.\n\
+             Checked URL: {}",
+            repo,
+            url
+        );
+    }
+
+    response
         .error_for_status()
         .context("GitHub API returned an error status")?
         .json::<GithubRelease>()
         .await
         .context("parsing release JSON from GitHub")
+}
+
+fn release_repo(repo_override: Option<&str>) -> Result<String> {
+    let from_env = std::env::var("UNLY_RELEASE_REPO").ok();
+    let repo = repo_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .or(from_env)
+        .unwrap_or_else(|| DEFAULT_RELEASE_REPO.to_string());
+    if !repo.contains('/') {
+        anyhow::bail!("invalid repository '{}'; expected format owner/repo", repo);
+    }
+    Ok(repo)
 }
 
 fn build_client() -> Result<reqwest::Client> {

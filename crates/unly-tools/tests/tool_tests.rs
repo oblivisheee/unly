@@ -35,6 +35,7 @@ async fn fs_read_blocks_path_traversal() {
             json!({"path": "../../etc/passwd"}),
             make_ctx(),
             false,
+            false,
         )
         .await
         .expect("execute should not fail at policy level");
@@ -61,6 +62,7 @@ async fn privileged_tool_requires_approval() {
             json!({"url": "https://example.com", "body": {}}),
             make_ctx(),
             false, // not approved
+            false,
         )
         .await;
 
@@ -82,6 +84,7 @@ async fn privileged_tool_runs_when_approved() {
             json!({"url": "https://httpbin.org/status/200"}),
             make_ctx(),
             false,
+            false,
         )
         .await;
 
@@ -98,7 +101,7 @@ async fn tool_not_found_returns_error() {
     let registry = ToolRegistry::new(default_policy(), vec![], vec![]);
 
     let result = registry
-        .execute("nonexistent_tool", json!({}), make_ctx(), false)
+        .execute("nonexistent_tool", json!({}), make_ctx(), false, false)
         .await;
 
     assert!(
@@ -117,7 +120,7 @@ async fn disabled_tool_returns_not_found() {
     registry.register(unly_tools::builtin::FsReadTool);
 
     let result = registry
-        .execute("fs_read", json!({"path": "/tmp"}), make_ctx(), false)
+        .execute("fs_read", json!({"path": "/tmp"}), make_ctx(), false, false)
         .await;
 
     assert!(
@@ -182,6 +185,7 @@ async fn approved_bash_bypasses_allowlist() {
             json!({"command": "echo approved-run"}),
             make_ctx(),
             true,
+            false,
         )
         .await
         .expect("approved execution should not be denied");

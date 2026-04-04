@@ -375,7 +375,8 @@ user approval before execution."
     };
     let approval_behavior_directive = "- Approval behavior: never ask for permission in plain text (no \"confirm?\", \"allow?\", \"shall I proceed?\"). \
 If a tool is needed, call the tool immediately and let runtime handle Approve/Deny. \
-For cron tasks, prefer the native `cron_job` tool. For delegated execution, prefer `spawn_subagent`."
+For cron tasks, prefer the native `cron_job` tool. Use `spawn_subagent` only when the user explicitly asks for a subagent/delegation. \
+When creating cron jobs, set `notify_mode` explicitly from user intent: use `silent` only when user explicitly asks for no notifications; otherwise use `message`."
         .to_string();
 
     let capabilities = format!(
@@ -396,7 +397,7 @@ For cron tasks, prefer the native `cron_job` tool. For delegated execution, pref
   - max tool execution seconds: {}
   - max concurrent tools: {}
 - You have persistent semantic memory and should retain durable non-secret user context.
-- You can use subagents for focused decomposition when it materially improves task quality.
+- Use subagents only when the user explicitly requests delegation/subagent execution.
 - Think before speaking: keep planning/tool execution in the internal thinking phase; only return final user-facing output.
 - Support both model types: with explicit reasoning channels and without them.
 - Never fabricate outcomes, access, or tool results; explicitly state limitations when access is unavailable.
