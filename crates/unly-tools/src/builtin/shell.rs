@@ -19,7 +19,7 @@ use unly_core::{
 ///
 /// IMPORTANT: This tool is Dangerous and always requires approval.
 /// The command must match the configured shell_allowlist policy.
-/// Executed via bash -lc with restricted environment.
+/// Executed via bash -ilc with restricted environment.
 pub struct ShellTool {
     allowlist: Vec<String>,
     working_dir: Option<PathBuf>,
@@ -41,6 +41,9 @@ static BASH_JOBS: Lazy<Mutex<HashMap<String, BashJobStatus>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 impl ShellTool {
+    const GLOBAL_PATH_SEGMENTS: &'static str =
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin:/snap/bin";
+
     pub fn new(
         allowlist: Vec<String>,
         working_dir: Option<PathBuf>,
@@ -74,16 +77,51 @@ impl ShellTool {
             .or_else(|| self.working_dir.clone())
     }
 
-    fn wrap_with_bashrc(command: &str) -> String {
+    fn default_path_value() -> String {
+        let mut segments = vec![Self::GLOBAL_PATH_SEGMENTS.to_string()];
+        if let Ok(path) = std::env::var("PATH")
+            && !path.trim().is_empty()
+        {
+            segments.push(path);
+        }
+        segments.join(":")
+    }
+
+    fn apply_restricted_env(cmd: &mut Command) {
+        cmd.env_clear();
+        cmd.env("PATH", Self::default_path_value());
+        cmd.env("CI", "1");
+        for key in [
+            "HOME",
+            "USER",
+            "LOGNAME",
+            "SHELL",
+            "LANG",
+            "LC_ALL",
+            "LC_CTYPE",
+            "TERM",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                cmd.env(key, value);
+            }
+        }
+    }
+
+    fn wrap_with_shell_init(command: &str) -> String {
         format!(
-            "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi; {}",
+            "for f in /etc/profile ~/.profile ~/.bash_profile ~/.bash_login ~/.bashrc; do if [ -f \"$f\" ]; then source \"$f\"; fi; done; export PATH=\"{}:$PATH\"; {}",
+            Self::GLOBAL_PATH_SEGMENTS,
             command
         )
     }
 
     fn wrap_bash_command(command: &str) -> String {
         format!(
-            "if [ -f ~/.bashrc ]; then source ~/.bashrc; fi; set -o pipefail; {}",
+            "for f in /etc/profile ~/.profile ~/.bash_profile ~/.bash_login ~/.bashrc; do if [ -f \"$f\" ]; then source \"$f\"; fi; done; export PATH=\"{}:$PATH\"; set -o pipefail; {}",
+            Self::GLOBAL_PATH_SEGMENTS,
             command
         )
     }
@@ -102,14 +140,8 @@ impl ShellTool {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        // Restricted environment: only essential vars.
-        // Using login-shell semantics lets shell startup files populate PATH.
-        cmd.env_clear();
-        cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin");
-        cmd.env("CI", "1");
-        if let Ok(home) = std::env::var("HOME") {
-            cmd.env("HOME", home);
-        }
+        // Restricted environment with a robust default PATH for user-installed tools.
+        Self::apply_restricted_env(&mut cmd);
         if let Some(dir) = working_dir {
             cmd.current_dir(dir);
         }
@@ -253,8 +285,8 @@ impl Tool for ShellTool {
                 );
             }
             let program = "/usr/bin/env".to_string();
-            let program_args = vec!["bash".to_string(), "-lc".to_string()];
-            let command = Self::wrap_with_bashrc(command);
+            let program_args = vec!["bash".to_string(), "-ilc".to_string()];
+            let command = Self::wrap_with_shell_init(command);
             let job_id_for_task = job_id.clone();
             tokio::spawn(async move {
                 let mut cmd = Command::new(program);
@@ -262,12 +294,7 @@ impl Tool for ShellTool {
                 cmd.stdin(Stdio::null());
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
-                cmd.env_clear();
-                cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin");
-                cmd.env("CI", "1");
-                if let Ok(home) = std::env::var("HOME") {
-                    cmd.env("HOME", home);
-                }
+                ShellTool::apply_restricted_env(&mut cmd);
                 if let Some(dir) = working_dir {
                     cmd.current_dir(dir);
                 }
@@ -309,11 +336,11 @@ impl Tool for ShellTool {
                 start.elapsed().as_millis() as u64,
             ));
         }
-        let wrapped = Self::wrap_with_bashrc(command);
+        let wrapped = Self::wrap_with_shell_init(command);
         Ok(self
             .execute_with_program(
                 "/usr/bin/env",
-                &["bash", "-lc"],
+                &["bash", "-ilc"],
                 &wrapped,
                 working_dir,
                 ctx,
@@ -410,16 +437,11 @@ impl Tool for BashTool {
             let job_id_for_task = job_id.clone();
             tokio::spawn(async move {
                 let mut cmd = Command::new("/usr/bin/env");
-                cmd.args(["bash", "-lc"]).arg(wrapped);
+                cmd.args(["bash", "-ilc"]).arg(wrapped);
                 cmd.stdin(Stdio::null());
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
-                cmd.env_clear();
-                cmd.env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin");
-                cmd.env("CI", "1");
-                if let Ok(home) = std::env::var("HOME") {
-                    cmd.env("HOME", home);
-                }
+                ShellTool::apply_restricted_env(&mut cmd);
                 if let Some(dir) = working_dir {
                     cmd.current_dir(dir);
                 }
@@ -467,7 +489,7 @@ impl Tool for BashTool {
             .inner
             .execute_with_program(
                 "/usr/bin/env",
-                &["bash", "-lc"],
+                &["bash", "-ilc"],
                 &wrapped,
                 working_dir,
                 ctx,
@@ -482,16 +504,26 @@ mod tests {
     use super::ShellTool;
 
     #[test]
-    fn wraps_shell_command_with_bashrc_source() {
-        let wrapped = ShellTool::wrap_with_bashrc("echo ok");
-        assert!(wrapped.starts_with("if [ -f ~/.bashrc ]; then source ~/.bashrc; fi;"));
+    fn wraps_shell_command_with_profile_source() {
+        let wrapped = ShellTool::wrap_with_shell_init("echo ok");
+        assert!(
+            wrapped.contains(
+                "for f in /etc/profile ~/.profile ~/.bash_profile ~/.bash_login ~/.bashrc;"
+            )
+        );
+        assert!(wrapped.contains("export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/homebrew/bin:/snap/bin:$PATH\";"));
         assert!(wrapped.ends_with("echo ok"));
     }
 
     #[test]
-    fn wraps_bash_command_with_bashrc_and_pipefail() {
+    fn wraps_bash_command_with_profile_source_and_pipefail() {
         let wrapped = ShellTool::wrap_bash_command("echo ok");
-        assert!(wrapped.contains("source ~/.bashrc; fi; set -o pipefail;"));
+        assert!(
+            wrapped.contains(
+                "for f in /etc/profile ~/.profile ~/.bash_profile ~/.bash_login ~/.bashrc;"
+            )
+        );
+        assert!(wrapped.contains("set -o pipefail;"));
         assert!(wrapped.ends_with("echo ok"));
     }
 }
