@@ -1226,6 +1226,11 @@ fn cargo_unly_binary_path() -> PathBuf {
 
 const BUNDLED_SYSTEMD_UNIT: &str = include_str!("../../../deploy/unly.service");
 const SYSTEMD_UNIT_NAME: &str = "unly.service";
+const UNIT_SERVICE_USER_PLACEHOLDER: &str = "__UNLY_SERVICE_USER__";
+const UNIT_SERVICE_GROUP_PLACEHOLDER: &str = "__UNLY_SERVICE_GROUP__";
+const UNIT_WORKING_DIR_PLACEHOLDER: &str = "__UNLY_WORKING_DIRECTORY__";
+const UNIT_EXECUTABLE_PLACEHOLDER: &str = "__UNLY_EXECUTABLE__";
+const UNIT_CONFIG_PATH_PLACEHOLDER: &str = "__UNLY_CONFIG_PATH__";
 
 fn run_service_command(cmd: ServiceCommands, config_path: &Path) -> Result<()> {
     ensure_systemd_available()?;
@@ -1268,25 +1273,177 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
 }
 
 fn render_systemd_unit(config_path: &Path) -> Result<String> {
-    let current_exe = std::env::current_exe().context("resolving current executable path")?;
-    let workdir = workspace::workspace_dir();
-    let mut out = String::new();
+    let account = resolve_service_account()?;
+    let user_home = account.home;
+    let resolved_config_path = resolve_config_path_for_unit(config_path, &user_home)?;
+    let working_dir = resolved_config_path.parent().with_context(|| {
+        format!(
+            "resolving working directory from config path {}",
+            resolved_config_path.display()
+        )
+    })?;
+    let executable = user_home.join(".cargo").join("bin").join("unly");
+    render_systemd_unit_with_paths(
+        &account.username,
+        &account.group,
+        working_dir,
+        &executable,
+        &resolved_config_path,
+    )
+}
 
-    for line in BUNDLED_SYSTEMD_UNIT.lines() {
-        if line.starts_with("WorkingDirectory=") {
-            out.push_str(&format!("WorkingDirectory={}\n", workdir.display()));
-        } else if line.starts_with("ExecStart=") {
-            out.push_str(&format!(
-                "ExecStart={} start --config {}\n",
-                current_exe.display(),
-                config_path.display()
-            ));
-        } else {
-            out.push_str(line);
-            out.push('\n');
+fn render_systemd_unit_with_paths(
+    service_user: &str,
+    service_group: &str,
+    working_dir: &Path,
+    executable: &Path,
+    config_path: &Path,
+) -> Result<String> {
+    let rendered = BUNDLED_SYSTEMD_UNIT
+        .replace(UNIT_SERVICE_USER_PLACEHOLDER, service_user)
+        .replace(UNIT_SERVICE_GROUP_PLACEHOLDER, service_group)
+        .replace(
+            UNIT_WORKING_DIR_PLACEHOLDER,
+            &working_dir.display().to_string(),
+        )
+        .replace(
+            UNIT_EXECUTABLE_PLACEHOLDER,
+            &executable.display().to_string(),
+        )
+        .replace(
+            UNIT_CONFIG_PATH_PLACEHOLDER,
+            &config_path.display().to_string(),
+        );
+
+    for placeholder in [
+        UNIT_SERVICE_USER_PLACEHOLDER,
+        UNIT_SERVICE_GROUP_PLACEHOLDER,
+        UNIT_WORKING_DIR_PLACEHOLDER,
+        UNIT_EXECUTABLE_PLACEHOLDER,
+        UNIT_CONFIG_PATH_PLACEHOLDER,
+    ] {
+        if rendered.contains(placeholder) {
+            bail!("systemd template placeholder was not replaced: {placeholder}");
         }
     }
-    Ok(out)
+
+    Ok(rendered)
+}
+
+struct ServiceAccount {
+    username: String,
+    group: String,
+    home: PathBuf,
+}
+
+fn resolve_config_path_for_unit(config_path: &Path, user_home: &Path) -> Result<PathBuf> {
+    let raw = config_path.to_string_lossy();
+    if raw == "~" {
+        return Ok(user_home.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(user_home.join(rest));
+    }
+    if config_path.is_absolute() {
+        return Ok(config_path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(config_path))
+        .context("resolving absolute config path for systemd unit")
+}
+
+fn resolve_service_account() -> Result<ServiceAccount> {
+    let username = std::env::var("SUDO_USER")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
+        .unwrap_or_else(|| "root".to_string());
+
+    let home = lookup_home_dir_for_user(&username)?
+        .or_else(|| std::env::var("HOME").ok().map(PathBuf::from))
+        .with_context(|| format!("resolving home directory for user '{username}'"))?;
+
+    let group = lookup_primary_group_for_user(&username)?.unwrap_or_else(|| username.clone());
+
+    Ok(ServiceAccount {
+        username,
+        group,
+        home,
+    })
+}
+
+fn lookup_home_dir_for_user(username: &str) -> Result<Option<PathBuf>> {
+    let output = match ProcessCommand::new("getent")
+        .args(["passwd", username])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("running getent to resolve home directory"),
+    };
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let line = String::from_utf8(output.stdout)
+        .context("decoding getent output as UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let home = line.split(':').nth(5).unwrap_or("").trim();
+    if home.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(home)))
+}
+
+fn lookup_primary_group_for_user(username: &str) -> Result<Option<String>> {
+    let passwd_output = match ProcessCommand::new("getent")
+        .args(["passwd", username])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("running getent to resolve primary group"),
+    };
+
+    if !passwd_output.status.success() {
+        return Ok(None);
+    }
+
+    let passwd_line = String::from_utf8(passwd_output.stdout)
+        .context("decoding getent passwd output as UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let gid = passwd_line.split(':').nth(3).unwrap_or("").trim();
+    if gid.is_empty() {
+        return Ok(None);
+    }
+
+    let group_output = match ProcessCommand::new("getent").args(["group", gid]).output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("running getent group to resolve group name"),
+    };
+    if !group_output.status.success() {
+        return Ok(None);
+    }
+
+    let group_line = String::from_utf8(group_output.stdout)
+        .context("decoding getent group output as UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let group = group_line.split(':').next().unwrap_or("").trim();
+    if group.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(group.to_string()))
 }
 
 fn ensure_systemd_available() -> Result<()> {
@@ -1424,5 +1581,34 @@ fn print_ext_table(
     for (name, enabled, description) in &rows {
         let status = if *enabled { "enabled" } else { "disabled" };
         println!("{:<30} {:<10} {}", name, status, description);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_systemd_unit_replaces_placeholders() {
+        let rendered = render_systemd_unit_with_paths(
+            "alice",
+            "alice",
+            Path::new("/home/alice/.unly"),
+            Path::new("/home/alice/.cargo/bin/unly"),
+            Path::new("/home/alice/.unly/config.toml"),
+        )
+        .expect("render_systemd_unit_with_paths should not fail");
+
+        assert!(rendered.contains("User=alice"));
+        assert!(rendered.contains("Group=alice"));
+        assert!(rendered.contains("WorkingDirectory=/home/alice/.unly"));
+        assert!(rendered.contains(
+            "ExecStart=/home/alice/.cargo/bin/unly start --config /home/alice/.unly/config.toml"
+        ));
+        assert!(!rendered.contains(UNIT_SERVICE_USER_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_SERVICE_GROUP_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_WORKING_DIR_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_EXECUTABLE_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_CONFIG_PATH_PLACEHOLDER));
     }
 }

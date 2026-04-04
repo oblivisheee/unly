@@ -8,10 +8,10 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
-User=unly
-Group=unly
-WorkingDirectory=/opt/unly
-ExecStart=/opt/unly/bin/unly start --config /etc/unly/config.toml
+User=__UNLY_SERVICE_USER__
+Group=__UNLY_SERVICE_GROUP__
+WorkingDirectory=__UNLY_WORKING_DIRECTORY__
+ExecStart=__UNLY_EXECUTABLE__ start --config __UNLY_CONFIG_PATH__
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
@@ -23,15 +23,6 @@ EnvironmentFile=-/etc/unly/unly.env
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=unly
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/opt/unly/data /var/log/unly
-CapabilityBoundingSet=
-AmbientCapabilities=
 
 # Resource limits
 LimitNOFILE=65536
