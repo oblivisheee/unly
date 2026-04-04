@@ -50,9 +50,6 @@ jobs:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: ""
-          - runner: macos-13
-            target: x86_64-apple-darwin
-            ext: ""
           - runner: macos-14
             target: aarch64-apple-darwin
             ext: ""
@@ -82,7 +79,7 @@ jobs:
 
   release:
     needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
+    if: always() && needs.prepare.outputs.should_release == 'true' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
