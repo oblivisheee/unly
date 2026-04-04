@@ -439,6 +439,79 @@ pub fn scheduler_ref() -> Option<Arc<Scheduler>> {
     ACTIVE_SCHEDULER.read().ok().and_then(|g| g.clone())
 }
 
+/// Restore all enabled cron jobs from the database into the active scheduler.
+///
+/// Must be called **after** [`register_cron_executor`] so the callbacks can
+/// dispatch through the registered executor.  Jobs are registered in-memory
+/// only — the DB rows already exist and must not be duplicated.
+pub async fn restore_jobs_from_db(db: &Database, scheduler: &Arc<Scheduler>) {
+    use tracing::{info, warn};
+    let repo = unly_db::repo::job::JobRepo::new(db.conn());
+    let rows = match repo.list_enabled().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("scheduler: failed to load jobs from db on startup: {}", e);
+            return;
+        }
+    };
+    let total = rows.len();
+    let mut restored = 0usize;
+    for row in rows {
+        // Only restore cron-type jobs with an expression.
+        if row.job_type != "cron" {
+            continue;
+        }
+        let Some(cron_expr) = row.cron_expression.clone() else {
+            continue;
+        };
+        let def = unly_scheduler::JobDefinition {
+            id: row.id.clone(),
+            name: row.name.clone(),
+            description: row.description.clone(),
+            job_type: unly_scheduler::JobType::Cron,
+            cron_expression: Some(cron_expr),
+            payload: serde_json::from_str(&row.payload).unwrap_or_default(),
+            enabled: row.enabled,
+            retry_limit: row.retry_limit,
+        };
+        let cron_exec = CRON_EXECUTOR.read().ok().and_then(|g| g.clone());
+        let callback: unly_scheduler::JobCallback = Arc::new(move |payload: serde_json::Value| {
+            let cron_exec = cron_exec.clone();
+            Box::pin(async move {
+                let Some(exec) = cron_exec else {
+                    return Err("cron executor not initialized".to_string());
+                };
+                let task = payload
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let chat_raw = payload
+                    .get("chat_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let chat_id = ChatId::from_str(chat_raw)
+                    .map_err(|e| format!("invalid chat id: {}", e))?;
+                let notify_mode = payload
+                    .get("notify_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("silent")
+                    .to_string();
+                exec(task, chat_id, notify_mode, "cron".to_string()).await
+            })
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = std::result::Result<String, String>> + Send>,
+                >
+        });
+        scheduler.register_in_memory(def, callback).await;
+        restored += 1;
+    }
+    info!(
+        "scheduler: restored {}/{} cron jobs from database",
+        restored, total
+    );
+}
+
 pub fn build_notify_message(task: &str, trigger: &str, result: &str) -> String {
     format!(
         "Cron job executed ({})\nTask: {}\nResult: {}",

@@ -284,13 +284,13 @@ impl TelegramBot {
 
             Command::Status => {
                 let reports = self.provider_registry.health_all().await;
-                let mut lines = vec!["System Status".to_string()];
+                let mut lines = vec!["📊 System Status".to_string()];
                 for r in &reports {
                     let icon = match r.status {
-                        unly_core::types::HealthStatus::Healthy => "",
-                        unly_core::types::HealthStatus::Degraded => "",
-                        unly_core::types::HealthStatus::Unhealthy => "",
-                        unly_core::types::HealthStatus::Unknown => "",
+                        unly_core::types::HealthStatus::Healthy => "✅",
+                        unly_core::types::HealthStatus::Degraded => "⚠️",
+                        unly_core::types::HealthStatus::Unhealthy => "❌",
+                        unly_core::types::HealthStatus::Unknown => "❓",
                     };
                     lines.push(format!(
                         "{} {}: {}",
@@ -300,7 +300,36 @@ impl TelegramBot {
                     ));
                 }
                 let sessions = self.sessions.len();
-                lines.push(format!(" Active sessions: {}", sessions));
+                lines.push(format!("💬 Active sessions: {}", sessions));
+
+                // Show approval mode for this chat.
+                let auto_approve = self.sessions.get_flags(tg_chat_id).auto_approve;
+                let approval_mode = if auto_approve { "AUTO (no prompts)" } else { "MANUAL (requires Approve/Deny)" };
+                lines.push(format!("🔑 Approval mode: {}", approval_mode));
+
+                // Show active job count from DB.
+                let job_repo = unly_db::repo::job::JobRepo::new(self.db.conn());
+                match job_repo.list_enabled().await {
+                    Ok(jobs) => {
+                        lines.push(format!("⏰ Active cron jobs: {}", jobs.len()));
+                    }
+                    Err(_) => {
+                        lines.push("⏰ Active cron jobs: (unavailable)".to_string());
+                    }
+                }
+
+                // Show current provider/model for this session.
+                if let Some(ctx) = self.sessions.get(tg_chat_id) {
+                    lines.push(format!("🤖 Provider/model: {}/{}", ctx.provider, ctx.model));
+                } else {
+                    let default_provider = self.provider_registry
+                        .default_provider()
+                        .map(|p| p.name().to_string())
+                        .unwrap_or_else(|_| "copilot".to_string());
+                    let default_model = self.provider_registry.default_model();
+                    lines.push(format!("🤖 Provider/model (default): {}/{}", default_provider, default_model));
+                }
+
                 bot.send_message(msg.chat.id, lines.join("\n")).await?;
             }
 
@@ -469,9 +498,27 @@ impl TelegramBot {
                     self.audit
                         .success("approval_mode", tg_user_id.to_string(), "set mode=auto");
                     self.sessions.set_auto_approve(tg_chat_id, true);
+                    let policy = self.runtime.tool_policy();
+                    let scope = "this chat session";
+                    let affected: Vec<&str> = [
+                        if policy.require_approval_for_privileged { Some("privileged") } else { None },
+                        if policy.require_approval_for_dangerous  { Some("dangerous")  } else { None },
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    let affected_str = if affected.is_empty() {
+                        "no tools were pending approval".to_string()
+                    } else {
+                        format!("{} tools", affected.join(" and "))
+                    };
                     bot.send_message(
                         msg.chat.id,
-                        "Approval mode set to AUTO. Tool actions run without approve/deny prompts.",
+                        format!(
+                            "✅ Approval mode → AUTO (scope: {scope})\n\
+                             Previously {affected_str} required explicit Approve/Deny.\n\
+                             Tool calls will now execute automatically without prompts."
+                        ),
                     )
                     .await?;
                 }
@@ -485,9 +532,44 @@ impl TelegramBot {
                     self.audit
                         .success("approval_mode", tg_user_id.to_string(), "set mode=manual");
                     self.sessions.set_auto_approve(tg_chat_id, false);
+                    let policy = self.runtime.tool_policy();
+                    let scope = "this chat session";
+                    let affected: Vec<&str> = [
+                        if policy.require_approval_for_privileged { Some("privileged") } else { None },
+                        if policy.require_approval_for_dangerous  { Some("dangerous")  } else { None },
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    let affected_str = if affected.is_empty() {
+                        "No tools require approval per global policy, but manual mode is active"
+                            .to_string()
+                    } else {
+                        format!(
+                            "{} tools will require explicit Approve/Deny before executing",
+                            affected.join(" and ")
+                        )
+                    };
                     bot.send_message(
                         msg.chat.id,
-                        "Approval mode set to MANUAL. Pending actions require explicit approval.",
+                        format!(
+                            "🔒 Approval mode → MANUAL (scope: {scope})\n\
+                             {affected_str}.\n\
+                             Use /approval auto to disable prompts."
+                        ),
+                    )
+                    .await?;
+                }
+                "" => {
+                    // Show current mode when called without argument.
+                    let auto = self.sessions.get_flags(tg_chat_id).auto_approve;
+                    let mode_str = if auto { "AUTO" } else { "MANUAL" };
+                    bot.send_message(
+                        msg.chat.id,
+                        format!(
+                            "Current approval mode: {mode_str}\n\
+                             Use /approval auto or /approval manual to change."
+                        ),
                     )
                     .await?;
                 }
@@ -500,7 +582,7 @@ impl TelegramBot {
                     );
                     bot.send_message(
                         msg.chat.id,
-                        "Invalid approval mode. Use: /approval manual or /approval auto",
+                        "Invalid approval mode. Use: /approval manual | /approval auto | /approval (show current)",
                     )
                     .await?;
                 }
@@ -679,7 +761,10 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         }
 
         // Get or create session context.
-        let ctx = self.sessions.get(tg_chat_id).unwrap_or_else(|| {
+        // If this is a fresh context (no in-memory session), try to restore
+        // conversation history from the database so the agent remembers
+        // previous exchanges after a restart.
+        let mut ctx = self.sessions.get(tg_chat_id).unwrap_or_else(|| {
             let permissions = build_permissions(tg_user_id, &self.config.telegram.admin_user_ids);
             let chat_id = ChatId::new();
             // The runtime already has the system prompt baked in — pass empty here so
@@ -697,6 +782,34 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                 self.runtime.config().system_prompt.clone(),
             )
         });
+
+        // Restore message history from DB when the in-memory session is empty.
+        if ctx.messages.is_empty() {
+            let chat_repo_hist = unly_db::repo::chat::ChatRepo::new(self.db.conn());
+            if let Ok(chat_row_hist) = chat_repo_hist
+                .get_or_create_chat(tg_chat_id, msg.chat.title().or(msg.chat.username()))
+                .await
+            {
+                // Load the last 40 messages (20 turns) to bound context size.
+                if let Ok(history) = chat_repo_hist.list_messages(&chat_row_hist.id, 40).await {
+                    for row in history {
+                        let text_content = serde_json::from_str::<serde_json::Value>(&row.content)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                            })
+                            .unwrap_or(row.content);
+                        ctx.push_message(unly_core::model::ChatMessage {
+                            role: row.role,
+                            content: unly_core::model::ChatMessageContent::Text(text_content),
+                            tool_call_id: None,
+                            tool_calls: None,
+                            name: None,
+                        });
+                    }
+                }
+            }
+        }
 
         let trimmed = text.trim();
         let subagent_goal = if let Some(goal) = parse_spawn_subagent_request(trimmed) {
@@ -872,63 +985,67 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                         );
                     }
                 }
-                StreamEvent::ApprovalRequired(pending) => {
+                StreamEvent::ApprovalRequired { pending, ctx: event_ctx } => {
                     let _ = typing_stop_tx.send(true);
                     if self.sessions.get_flags(tg_chat_id).auto_approve {
-                        if let Some(mut ctx) = self.sessions.get(tg_chat_id) {
-                            ctx.pending_approvals = pending.clone();
-                            let mut response = self.runtime.process_approved(&mut ctx).await;
-                            for _ in 0..8 {
-                                match response {
-                                    Ok(AgentResponse::ApprovalRequired { .. }) => {
-                                        response = self.runtime.process_approved(&mut ctx).await;
-                                    }
-                                    _ => break,
-                                }
-                            }
-                            if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut ctx).await {
-                                error!(
-                                    chat_id = tg_chat_id,
-                                    error = %e,
-                                    "failed to send auto-approved media"
-                                );
-                            }
-                            self.sessions.set(tg_chat_id, ctx);
+                        // Use the context snapshot from the event rather than
+                        // fetching from sessions to avoid a race where the
+                        // background task has not yet called sessions.set().
+                        let mut ctx = *event_ctx;
+                        let mut response = self.runtime.process_approved(&mut ctx).await;
+                        for _ in 0..8 {
                             match response {
-                                Ok(AgentResponse::Text(text)) => {
-                                    if let Err(e) =
-                                        send_response_text(&bot, msg.chat.id, &text).await
-                                    {
-                                        error!(
-                                            chat_id = tg_chat_id,
-                                            error = %e,
-                                            "failed to send auto-approved response"
-                                        );
-                                    }
+                                Ok(AgentResponse::ApprovalRequired { .. }) => {
+                                    response = self.runtime.process_approved(&mut ctx).await;
                                 }
-                                Ok(AgentResponse::ApprovalRequired { pending: p }) => {
-                                    let keyboard = InlineKeyboardMarkup::new(vec![vec![
-                                        InlineKeyboardButton::callback("Approve", "approve"),
-                                        InlineKeyboardButton::callback("Deny", "deny"),
-                                    ]]);
-                                    let _ = bot
-                                        .send_message(msg.chat.id, format_approval_prompt(&p))
-                                        .parse_mode(ParseMode::Html)
-                                        .reply_markup(keyboard)
-                                        .await;
-                                }
-                                Err(e) => {
-                                    let _ = bot
-                                        .send_message(
-                                            msg.chat.id,
-                                            format!("Error after approval: {}", e),
-                                        )
-                                        .await;
+                                _ => break,
+                            }
+                        }
+                        if let Err(e) = drain_pending_media(&bot, msg.chat.id, &mut ctx).await {
+                            error!(
+                                chat_id = tg_chat_id,
+                                error = %e,
+                                "failed to send auto-approved media"
+                            );
+                        }
+                        self.sessions.set(tg_chat_id, ctx);
+                        match response {
+                            Ok(AgentResponse::Text(text)) => {
+                                if let Err(e) =
+                                    send_response_text(&bot, msg.chat.id, &text).await
+                                {
+                                    error!(
+                                        chat_id = tg_chat_id,
+                                        error = %e,
+                                        "failed to send auto-approved response"
+                                    );
                                 }
                             }
-                            return Ok(());
+                            Ok(AgentResponse::ApprovalRequired { pending: p }) => {
+                                let keyboard = InlineKeyboardMarkup::new(vec![vec![
+                                    InlineKeyboardButton::callback("Approve", "approve"),
+                                    InlineKeyboardButton::callback("Deny", "deny"),
+                                ]]);
+                                let _ = bot
+                                    .send_message(msg.chat.id, format_approval_prompt(&p))
+                                    .parse_mode(ParseMode::Html)
+                                    .reply_markup(keyboard)
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = bot
+                                    .send_message(
+                                        msg.chat.id,
+                                        format!("Error after approval: {}", e),
+                                    )
+                                    .await;
+                            }
                         }
+                        return Ok(());
                     }
+                    // Manual approval: save the context snapshot to sessions so
+                    // handle_callback can resume from the correct state.
+                    self.sessions.set(tg_chat_id, *event_ctx);
                     let keyboard = InlineKeyboardMarkup::new(vec![vec![
                         InlineKeyboardButton::callback("Approve", "approve"),
                         InlineKeyboardButton::callback("Deny", "deny"),

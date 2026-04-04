@@ -80,7 +80,19 @@ impl Scheduler {
         }
     }
 
-    /// Toggle in-memory enabled state for a registered job.
+    /// Register a job in memory only (no database upsert).
+    ///
+    /// Used when restoring persisted jobs on startup — the definition is
+    /// already in the DB so we only need to (re-)add it to the dispatch map.
+    pub async fn register_in_memory(&self, job: JobDefinition, callback: JobCallback) {
+        info!("restoring job from db: {} ({})", job.name, job.id);
+        self.jobs
+            .write()
+            .await
+            .insert(job.id.clone(), (job, callback));
+    }
+
+
     pub async fn set_job_enabled(&self, id: &str, enabled: bool) -> bool {
         let found = {
             let mut jobs = self.jobs.write().await;
@@ -202,7 +214,7 @@ impl Scheduler {
 
                             let run_row = JobRunRow {
                                 id: run_id,
-                                job_id,
+                                job_id: job_id.clone(),
                                 status,
                                 output,
                                 error,
@@ -213,6 +225,10 @@ impl Scheduler {
                             let repo = unly_db::repo::job::JobRepo::new(db.conn());
                             if let Err(e) = repo.insert_run(&run_row).await {
                                 warn!("failed to persist job run: {}", e);
+                            }
+                            // Update last_run_at on the job row.
+                            if let Err(e) = repo.update_last_run(&job_id, finished_at).await {
+                                warn!("failed to update last_run_at for job {}: {}", job_id, e);
                             }
                         });
                     }
