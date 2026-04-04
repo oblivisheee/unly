@@ -1,5 +1,5 @@
 use std::path::Path;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub fn init_logging(level: &str, json: bool) {
     init_logging_with_file(level, json, None);

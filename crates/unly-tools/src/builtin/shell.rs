@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -11,8 +11,8 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
     Result,
+    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
 };
 
 /// Tool: execute a shell command.

@@ -2,7 +2,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{error, warn};
 use uuid::Uuid;
 
-use unly_db::{repo::audit::AuditRow, Database};
+use unly_db::{Database, repo::audit::AuditRow};
 
 use crate::event::AuditEvent;
 

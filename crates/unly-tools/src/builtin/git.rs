@@ -1,12 +1,12 @@
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
     Result,
+    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
 };
 
 /// Tool: git status.

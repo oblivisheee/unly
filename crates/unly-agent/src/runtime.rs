@@ -5,11 +5,11 @@ use tracing::{debug, warn};
 
 use unly_config::AppConfig;
 use unly_core::{
+    Result,
     model::{ChatMessage, ChatMessageContent, ChatRequest, StreamChunk},
     permissions::Permission,
     provider::Provider,
     tool::ToolContext,
-    Result,
 };
 use unly_memory::{MemoryQuery, MemoryScope, MemoryStore};
 use unly_plugins::{PluginLoader, SkillLoader};

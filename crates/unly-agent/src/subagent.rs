@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex};
-use tokio::sync::watch;
 use tokio::sync::Semaphore;
+use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::info;
 
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseBackend, Set, Statement};
-use unly_core::{ids::AgentId, permissions::PermissionSet, types::ExecutionStatus, Result};
-use unly_db::entity::subagents;
+use unly_core::{Result, ids::AgentId, permissions::PermissionSet, types::ExecutionStatus};
 use unly_db::Database;
+use unly_db::entity::subagents;
 
 use crate::context::AgentContext;
 use crate::runtime::{AgentResponse, AgentRuntime};

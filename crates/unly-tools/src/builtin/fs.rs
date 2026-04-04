@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
     Result,
+    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
 };
 
 /// Tool: Read a file.
@@ -301,7 +301,7 @@ impl Tool for FsDeleteTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
         let recursive = args["recursive"].as_bool().unwrap_or(false);
@@ -380,7 +380,7 @@ impl Tool for FsCopyTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
         let dst = match validate_path(dst_str) {
@@ -390,7 +390,7 @@ impl Tool for FsCopyTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
 
@@ -464,7 +464,7 @@ impl Tool for FsMoveTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
         let dst = match validate_path(dst_str) {
@@ -474,7 +474,7 @@ impl Tool for FsMoveTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
 
@@ -538,7 +538,7 @@ impl Tool for FsMkdirTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
 
@@ -594,7 +594,7 @@ impl Tool for FsStatTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
 
@@ -697,7 +697,7 @@ impl Tool for FsGrepTool {
                     ctx.tool_call_id.clone(),
                     e,
                     start.elapsed().as_millis() as u64,
-                ))
+                ));
             }
         };
 

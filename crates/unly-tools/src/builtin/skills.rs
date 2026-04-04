@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
     Result,
+    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
 };
-use unly_plugins::{build_frontmatter, PluginLoader, SkillLoader};
+use unly_plugins::{PluginLoader, SkillLoader, build_frontmatter};
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 

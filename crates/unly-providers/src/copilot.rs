@@ -16,13 +16,13 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 use unly_core::{
+    Error, Result,
     model::{
         ChatMessageContent, ChatRequest, ChatResponse, ContentPart, EmbeddingRequest,
         EmbeddingResponse, FunctionCall, Model, StreamChunk, ToolCall, Usage,
     },
     provider::{Provider, TokenStream},
     types::{HealthReport, ProviderCapabilities},
-    Error, Result,
 };
 
 use crate::error::{ProviderError, ProviderResult};

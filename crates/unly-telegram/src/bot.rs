@@ -19,7 +19,7 @@ use unly_agent::{
     SubagentRequest, SubagentSpawnConfig,
 };
 use unly_audit::AuditLogger;
-use unly_config::{workspace, AppConfig, DbType};
+use unly_config::{AppConfig, DbType, workspace};
 use unly_core::ids::ChatId;
 use unly_core::model::{ChatMessageContent, ContentPart, ImageUrl};
 use unly_db::Database;
@@ -316,9 +316,9 @@ impl TelegramBot {
 
             Command::Help => {
                 let text = format!(
-                "{}\n\nTip: send text, documents, or photos — I can process attachments directly.",
-                Command::descriptions()
-            );
+                    "{}\n\nTip: send text, documents, or photos — I can process attachments directly.",
+                    Command::descriptions()
+                );
                 bot.send_message(msg.chat.id, text).await?;
             }
 
@@ -882,7 +882,8 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         // Restore message history from DB when the in-memory session is empty.
         // Explicit conversation reset commands skip history restore once.
         let skip_history_restore = self.sessions.take_skip_history_restore(tg_chat_id);
-        if ctx.messages.is_empty() && !skip_history_restore
+        if ctx.messages.is_empty()
+            && !skip_history_restore
             && let Ok(chat_row_hist) = &chat_row
         {
             // Load the last 40 messages (20 turns) to bound context size.
@@ -1454,9 +1455,7 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         }
 
         if handled {
-            if delete_callback_message
-                && let Some(msg_ref) = q.message.as_ref()
-            {
+            if delete_callback_message && let Some(msg_ref) = q.message.as_ref() {
                 let _ = bot.delete_message(msg_ref.chat().id, msg_ref.id()).await;
             }
             let _ = bot.answer_callback_query(q.id).await;
@@ -1523,8 +1522,11 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
         };
         let mut text = format!(
             "{}\nDepth: <code>{}</code>\nConcurrent: <code>{}</code>\nToken budget: <code>{}</code>\nChild limit: <code>{}</code>\n",
-            title, cfg.max_subagent_depth, cfg.max_concurrent_subagents, cfg.subagent_token_budget
-            , cfg.max_child_subagents_per_parent
+            title,
+            cfg.max_subagent_depth,
+            cfg.max_concurrent_subagents,
+            cfg.subagent_token_budget,
+            cfg.max_child_subagents_per_parent
         );
         if selected.is_empty() {
             text.push_str("\nNo subagents in this view.");
@@ -1597,7 +1599,11 @@ Primary memory root is MEMORY.md; linked memory/*.md files are additional AI-man
                         .map(|r| truncate_for_message(r, 1800))
                         .unwrap_or_else(|| "No result yet.".to_string()),
                 ),
-                escape_html(if tail.is_empty() { "No log entries yet." } else { &tail })
+                escape_html(if tail.is_empty() {
+                    "No log entries yet."
+                } else {
+                    &tail
+                })
             );
             let back = if d.status == "running" || d.status == "pending" {
                 SubagentMenuView::Active
@@ -1729,8 +1735,7 @@ Return plain text only, no markdown formatting.";
             self.provider_registry.default_model(),
             self.runtime.config().system_prompt.clone(),
         );
-        let prompt =
-            "Generate a short greeting message (1 sentence) for the beginning of a new chat. \
+        let prompt = "Generate a short greeting message (1 sentence) for the beginning of a new chat. \
 Keep it calm and professional. \
 Do not use markdown, lists, or emojis. \
 Do not mention settings or technical details. \

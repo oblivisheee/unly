@@ -3,24 +3,23 @@ use std::sync::Arc;
 
 use unly_agent::{AgentRuntime, AgentRuntimeConfig};
 use unly_audit::AuditLogger;
-use unly_config::{workspace, AppConfig};
+use unly_config::{AppConfig, workspace};
 use unly_db::Database;
 use unly_memory::MemoryStore;
 use unly_plugins::{PluginLoader, SkillLoader};
 use unly_providers::{
-    copilot::CopilotProvider, openai_compat::OpenAiCompatProvider, ProviderRegistry,
+    ProviderRegistry, copilot::CopilotProvider, openai_compat::OpenAiCompatProvider,
 };
 use unly_tools::{
+    ToolRegistry,
     builtin::{
-        create_scheduler, CronJobTool, FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool,
-        FsMkdirTool, FsMoveTool, FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool,
-        HttpGetTool, HttpPostTool, PluginCreateTool, PluginDisableTool, PluginEnableTool,
-        PluginListTool, PluginRemoveTool, SkillCreateTool, SkillDisableTool, SkillEnableTool,
-        SkillListTool, SkillRemoveTool, SpawnSubagentTool, TelegramSendDocumentTool,
-        TelegramSendPhotoTool,
+        CronJobTool, FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool, FsMkdirTool, FsMoveTool,
+        FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool, HttpGetTool, HttpPostTool,
+        PluginCreateTool, PluginDisableTool, PluginEnableTool, PluginListTool, PluginRemoveTool,
+        SkillCreateTool, SkillDisableTool, SkillEnableTool, SkillListTool, SkillRemoveTool,
+        SpawnSubagentTool, TelegramSendDocumentTool, TelegramSendPhotoTool, create_scheduler,
     },
     policy::ExecutionPolicy,
-    ToolRegistry,
 };
 
 fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
@@ -96,13 +95,11 @@ pub async fn build_providers(config: &AppConfig) -> Result<Arc<ProviderRegistry>
 }
 
 /// Header injected before skill instructions in the system prompt.
-const SKILLS_SECTION_HEADER: &str =
-    "# Skills\n\nThe following skills are available and their instructions should be \
+const SKILLS_SECTION_HEADER: &str = "# Skills\n\nThe following skills are available and their instructions should be \
 followed when relevant:\n\n";
 
 /// Header injected before plugin instructions in the system prompt.
-const PLUGINS_SECTION_HEADER: &str =
-    "# Plugins\n\nThe following plugins are installed and their instructions should be \
+const PLUGINS_SECTION_HEADER: &str = "# Plugins\n\nThe following plugins are installed and their instructions should be \
 followed when relevant:\n\n";
 
 /// Register the skill/plugin self-configuration tools into `registry`.
@@ -352,11 +349,9 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> S
         policy.require_approval_for_privileged,
         policy.require_approval_for_dangerous,
     ) {
-        (false, false) => {
-            "- Tool execution policy: all tools are pre-authorized by the operator. \
+        (false, false) => "- Tool execution policy: all tools are pre-authorized by the operator. \
 Execute tools directly whenever needed; do not ask the user for permission before running any tool."
-                .to_string()
-        }
+            .to_string(),
         (false, true) => {
             "- Tool execution policy: privileged tools are pre-authorized (execute directly, \
 no user confirmation needed). Dangerous tools still require explicit user approval."

@@ -10,10 +10,10 @@ use std::time::Duration;
 use tracing::debug;
 
 use unly_core::{
+    Error, Result,
     model::{ChatRequest, ChatResponse, EmbeddingRequest, EmbeddingResponse, Model, StreamChunk},
     provider::{Provider, TokenStream},
     types::{HealthReport, ProviderCapabilities},
-    Error, Result,
 };
 
 use crate::copilot::{parse_chat_response, parse_embeddings_response, parse_openai_models};

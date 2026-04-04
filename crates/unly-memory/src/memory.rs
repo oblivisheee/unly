@@ -4,10 +4,10 @@ use std::sync::Arc;
 use tracing::debug;
 use uuid::Uuid;
 
-use unly_core::{model::EmbeddingRequest, provider::Provider, types::Timestamp, Result};
+use unly_core::{Result, model::EmbeddingRequest, provider::Provider, types::Timestamp};
 use unly_db::{
-    repo::memory::{MemoryEntryRow, MemoryRepo},
     Database,
+    repo::memory::{MemoryEntryRow, MemoryRepo},
 };
 
 use crate::{

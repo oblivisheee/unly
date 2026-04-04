@@ -5,8 +5,8 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult},
     Error, Result,
+    tool::{Tool, ToolContext, ToolResult},
 };
 
 use crate::policy::ExecutionPolicy;
@@ -111,9 +111,7 @@ impl ToolRegistry {
         })?;
 
         let mut exec_args = args;
-        if approved
-            && let serde_json::Value::Object(obj) = &mut exec_args
-        {
+        if approved && let serde_json::Value::Object(obj) = &mut exec_args {
             obj.insert("__approved".to_string(), serde_json::Value::Bool(true));
         }
 
