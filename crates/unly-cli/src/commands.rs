@@ -1282,7 +1282,7 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
             resolved_config_path.display()
         )
     })?;
-    let executable = user_home.join(".cargo").join("bin").join("unly");
+    let executable = resolve_service_executable()?;
     render_systemd_unit_with_paths(
         &account.username,
         &account.group,
@@ -1290,6 +1290,10 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
         &executable,
         &resolved_config_path,
     )
+}
+
+fn resolve_service_executable() -> Result<PathBuf> {
+    std::env::current_exe().context("resolving current executable path for systemd ExecStart")
 }
 
 fn render_systemd_unit_with_paths(
