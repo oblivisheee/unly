@@ -1249,6 +1249,8 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
         );
     }
 
+    ensure_unly_user()?;
+
     let rendered = render_systemd_unit(config_path)?;
     let tmp_unit = std::env::temp_dir().join(format!("unly-{}.service", std::process::id()));
     std::fs::write(&tmp_unit, rendered)
@@ -1271,11 +1273,6 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
     let current_exe = std::env::current_exe().context("resolving current executable path")?;
     let workdir = workspace::workspace_dir();
 
-    // Resolve the username that will own/run the service.  We prefer the
-    // login name reported by the OS; fall back to the numeric UID string so
-    // the unit is always valid.
-    let username = current_username();
-
     let mut out = String::new();
 
     for line in BUNDLED_SYSTEMD_UNIT.lines() {
@@ -1287,21 +1284,6 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
                 current_exe.display(),
                 config_path.display()
             ));
-        } else if line.starts_with("User=") {
-            out.push_str(&format!("User={username}\n"));
-        } else if line.starts_with("Group=") {
-            out.push_str(&format!("Group={username}\n"));
-        } else if line.starts_with("ReadWritePaths=") {
-            // Grant write access to the entire workspace directory so that the
-            // database, token cache, and all runtime files remain writable even
-            // when ProtectSystem=strict is active.
-            out.push_str(&format!("ReadWritePaths={}\n", workdir.display()));
-        } else if line.starts_with("ProtectHome=") {
-            // The default workspace lives inside the user home directory
-            // (~/.unly).  Keeping ProtectHome=read-only would prevent the
-            // database from being opened for writes, causing an immediate
-            // exit-code failure.  Set it to false so home is accessible.
-            out.push_str("ProtectHome=false\n");
         } else {
             out.push_str(line);
             out.push('\n');
@@ -1310,45 +1292,52 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
     Ok(out)
 }
 
-/// Return the login name of the process owner, or fall back to the UID string.
-fn current_username() -> String {
-    // Prefer the output of `id -un` — it reflects the actual OS user and
-    // cannot be spoofed by environment variable manipulation.
-    if let Ok(output) = ProcessCommand::new("id").arg("-un").output()
-        && output.status.success()
-    {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !name.is_empty() {
-            return name;
-        }
+/// Create the system group and user `unly` if they do not already exist.
+///
+/// This is called during `unly service install` so that the installed
+/// systemd unit can run as a dedicated unprivileged account with no login
+/// shell, while still having access to the full filesystem.
+fn ensure_unly_user() -> Result<()> {
+    // Check / create group ────────────────────────────────────────────────────
+    let group_exists = ProcessCommand::new("getent")
+        .args(["group", "unly"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !group_exists {
+        run_command_with_optional_sudo("groupadd", &["--system", "unly"])
+            .context("creating system group 'unly'")?;
+        println!("Created system group 'unly'.");
     }
 
-    // Fall back to well-known PAM environment variables only when `id` is
-    // not available (unusual, but possible in minimal containers).
-    if let Ok(name) = std::env::var("LOGNAME")
-        && !name.is_empty()
-    {
-        return name;
-    }
-    if let Ok(name) = std::env::var("USER")
-        && !name.is_empty()
-    {
-        return name;
+    // Check / create user ─────────────────────────────────────────────────────
+    let user_exists = ProcessCommand::new("getent")
+        .args(["passwd", "unly"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !user_exists {
+        run_command_with_optional_sudo(
+            "useradd",
+            &[
+                "--system",
+                "--no-create-home",
+                "--gid",
+                "unly",
+                "--shell",
+                "/sbin/nologin",
+                "--comment",
+                "Unly Agent Service Account",
+                "unly",
+            ],
+        )
+        .context("creating system user 'unly'")?;
+        println!("Created system user 'unly'.");
     }
 
-    // Numeric UID is always accepted in a systemd User= directive.
-    if let Ok(output) = ProcessCommand::new("id").arg("-u").output()
-        && output.status.success()
-    {
-        let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !uid.is_empty() {
-            return uid;
-        }
-    }
-
-    // Last-resort: 'nobody' is a non-privileged account present on virtually
-    // every Linux system and is safer than defaulting to 'root'.
-    "nobody".to_string()
+    Ok(())
 }
 
 fn ensure_systemd_available() -> Result<()> {
@@ -1494,13 +1483,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_username_is_non_empty() {
-        let name = current_username();
-        assert!(!name.is_empty(), "current_username() must return a non-empty string");
-    }
-
-    #[test]
-    fn render_systemd_unit_replaces_all_dynamic_fields() {
+    fn render_systemd_unit_replaces_dynamic_fields() {
         let config_path = Path::new("/tmp/test-unly/config.toml");
         let rendered = render_systemd_unit(config_path)
             .expect("render_systemd_unit should not fail");
@@ -1522,43 +1505,36 @@ mod tests {
             "rendered unit must not contain hardcoded WorkingDirectory=/opt/unly"
         );
 
-        // User= and Group= must be replaced with the current user, not "unly".
+        // User and Group must remain as 'unly' (the dedicated service account).
         assert!(
-            !rendered.contains("User=unly\n"),
-            "rendered unit must not contain hardcoded User=unly"
+            rendered.contains("User=unly\n"),
+            "rendered unit must retain User=unly"
         );
         assert!(
-            !rendered.contains("Group=unly\n"),
-            "rendered unit must not contain hardcoded Group=unly"
-        );
-        let username = current_username();
-        assert!(
-            rendered.contains(&format!("User={username}\n")),
-            "rendered unit must contain User=<current_user>"
-        );
-        assert!(
-            rendered.contains(&format!("Group={username}\n")),
-            "rendered unit must contain Group=<current_user>"
+            rendered.contains("Group=unly\n"),
+            "rendered unit must retain Group=unly"
         );
 
-        // ReadWritePaths must not reference /opt/unly/data or /var/log/unly.
+        // No security sandbox directives must appear in the rendered unit.
         assert!(
-            !rendered.contains("/opt/unly/data"),
-            "rendered unit must not contain hardcoded ReadWritePaths /opt/unly/data"
+            !rendered.contains("ProtectSystem="),
+            "rendered unit must not contain ProtectSystem="
         );
         assert!(
-            !rendered.contains("/var/log/unly"),
-            "rendered unit must not reference non-existent /var/log/unly"
-        );
-
-        // ProtectHome must be false so that the workspace inside home is writable.
-        assert!(
-            rendered.contains("ProtectHome=false\n"),
-            "rendered unit must have ProtectHome=false to allow writes inside home"
+            !rendered.contains("ProtectHome="),
+            "rendered unit must not contain ProtectHome="
         );
         assert!(
-            !rendered.contains("ProtectHome=read-only"),
-            "rendered unit must not have ProtectHome=read-only"
+            !rendered.contains("NoNewPrivileges="),
+            "rendered unit must not contain NoNewPrivileges="
+        );
+        assert!(
+            !rendered.contains("PrivateTmp="),
+            "rendered unit must not contain PrivateTmp="
+        );
+        assert!(
+            !rendered.contains("ReadWritePaths="),
+            "rendered unit must not contain ReadWritePaths="
         );
     }
 }

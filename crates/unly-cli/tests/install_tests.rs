@@ -334,36 +334,38 @@ fn migrate_is_idempotent() {
 
 // ── systemd unit template tests ───────────────────────────────────────────────
 
-/// The bundled `deploy/unly.service` template must not contain any of the
-/// known-broken values that caused the original systemd failure.
+/// The bundled `deploy/unly.service` template must not contain any sandbox or
+/// security hardening directives — the bot needs full system access.
 #[test]
-fn bundled_service_template_has_no_broken_values() {
+fn bundled_service_template_has_no_security_sandbox() {
     let template = include_str!("../../../deploy/unly.service");
 
-    // ProtectHome=read-only was the primary crash cause: it made ~/.unly
-    // read-only so SQLite could not open the database for writes.
-    assert!(
-        !template.contains("ProtectHome=read-only"),
-        "template must not contain ProtectHome=read-only"
-    );
+    // None of the systemd sandbox / security hardening knobs must be present.
+    for directive in &[
+        "ProtectHome=",
+        "ProtectSystem=",
+        "NoNewPrivileges=",
+        "PrivateTmp=",
+        "ReadWritePaths=",
+        "CapabilityBoundingSet=",
+        "AmbientCapabilities=",
+    ] {
+        assert!(
+            !template.contains(directive),
+            "template must not contain security directive: {}",
+            directive
+        );
+    }
 
-    // /var/log/unly is never created by the installer or the service.
+    // The service must run as the dedicated 'unly' account (created by the
+    // installer at `unly service install` time).
     assert!(
-        !template.contains("/var/log/unly"),
-        "template must not reference non-existent /var/log/unly"
+        template.contains("User=unly"),
+        "template must set User=unly"
     );
-
-    // The template must retain ProtectHome= (set to false) so that
-    // render_systemd_unit() can find and replace the line.
     assert!(
-        template.contains("ProtectHome="),
-        "template must contain a ProtectHome= line for render_systemd_unit to patch"
-    );
-
-    // ProtectSystem=strict must remain — it protects /usr, /boot, /etc.
-    assert!(
-        template.contains("ProtectSystem=strict"),
-        "template must keep ProtectSystem=strict for security"
+        template.contains("Group=unly"),
+        "template must set Group=unly"
     );
 
     // Restart policy must be present so the service recovers from transient
