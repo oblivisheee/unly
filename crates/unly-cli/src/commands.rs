@@ -1250,8 +1250,16 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
     }
 
     let rendered = render_systemd_unit(config_path)?;
-    std::fs::write(&unit_path, rendered)
+    let tmp_unit = std::env::temp_dir().join(format!("unly-{}.service", std::process::id()));
+    std::fs::write(&tmp_unit, rendered)
+        .with_context(|| format!("writing temporary unit file {}", tmp_unit.display()))?;
+
+    let tmp_str = tmp_unit.to_string_lossy().to_string();
+    let unit_str = unit_path.to_string_lossy().to_string();
+    let install_args = vec!["-m", "644", tmp_str.as_str(), unit_str.as_str()];
+    run_command_with_optional_sudo("install", &install_args)
         .with_context(|| format!("writing systemd unit file {}", unit_path.display()))?;
+    let _ = std::fs::remove_file(&tmp_unit);
 
     run_systemctl(&["daemon-reload"])?;
     println!("Installed systemd service: {}", unit_path.display());
@@ -1299,9 +1307,7 @@ fn ensure_systemd_available() -> Result<()> {
 }
 
 fn run_systemctl(args: &[&str]) -> Result<()> {
-    let output = ProcessCommand::new("systemctl")
-        .args(args)
-        .output()
+    let output = run_command_with_optional_sudo("systemctl", args)
         .with_context(|| format!("running `systemctl {}`", args.join(" ")))?;
     if output.status.success() {
         if !output.stdout.is_empty() {
@@ -1337,7 +1343,9 @@ fn remove_systemd_service_if_exists() -> Result<bool> {
 
     run_systemctl_allow_failure(&["stop", "unly"])?;
     run_systemctl_allow_failure(&["disable", "unly"])?;
-    remove_path_if_exists(&unit_path)
+    let unit_str = unit_path.to_string_lossy().to_string();
+    let rm_args = vec!["-f", unit_str.as_str()];
+    run_command_with_optional_sudo("rm", &rm_args)
         .with_context(|| format!("removing systemd unit file {}", unit_path.display()))?;
     run_systemctl(&["daemon-reload"])?;
     run_systemctl_allow_failure(&["reset-failed", "unly"])?;
@@ -1346,9 +1354,7 @@ fn remove_systemd_service_if_exists() -> Result<bool> {
 }
 
 fn run_systemctl_allow_failure(args: &[&str]) -> Result<()> {
-    let output = ProcessCommand::new("systemctl")
-        .args(args)
-        .output()
+    let output = run_command_with_optional_sudo("systemctl", args)
         .with_context(|| format!("running `systemctl {}`", args.join(" ")))?;
     if output.status.success() {
         if !output.stdout.is_empty() {
@@ -1370,6 +1376,31 @@ fn run_systemctl_allow_failure(args: &[&str]) -> Result<()> {
         }
     );
     Ok(())
+}
+
+fn run_command_with_optional_sudo(program: &str, args: &[&str]) -> Result<std::process::Output> {
+    if is_running_as_root() {
+        return ProcessCommand::new(program)
+            .args(args)
+            .output()
+            .with_context(|| format!("running `{}`", program));
+    }
+
+    let mut cmd = ProcessCommand::new("sudo");
+    cmd.arg(program).args(args);
+    cmd.output()
+        .with_context(|| format!("running `sudo {}`", program))
+}
+
+fn is_running_as_root() -> bool {
+    let output = match ProcessCommand::new("id").arg("-u").output() {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).trim() == "0"
 }
 
 /// Print a table of skills or plugins to stdout.
