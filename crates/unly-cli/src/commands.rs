@@ -1226,6 +1226,9 @@ fn cargo_unly_binary_path() -> PathBuf {
 
 const BUNDLED_SYSTEMD_UNIT: &str = include_str!("../../../deploy/unly.service");
 const SYSTEMD_UNIT_NAME: &str = "unly.service";
+const UNIT_WORKING_DIR_PLACEHOLDER: &str = "__UNLY_WORKING_DIRECTORY__";
+const UNIT_EXECUTABLE_PLACEHOLDER: &str = "__UNLY_EXECUTABLE__";
+const UNIT_CONFIG_PATH_PLACEHOLDER: &str = "__UNLY_CONFIG_PATH__";
 
 fn run_service_command(cmd: ServiceCommands, config_path: &Path) -> Result<()> {
     ensure_systemd_available()?;
@@ -1270,8 +1273,105 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
 }
 
 fn render_systemd_unit(config_path: &Path) -> Result<String> {
-    let _ = config_path;
-    Ok(BUNDLED_SYSTEMD_UNIT.to_string())
+    let user_home = resolve_invoking_user_home()?;
+    let resolved_config_path = resolve_config_path_for_unit(config_path, &user_home)?;
+    let working_dir = resolved_config_path.parent().with_context(|| {
+        format!(
+            "resolving working directory from config path {}",
+            resolved_config_path.display()
+        )
+    })?;
+    let executable = user_home.join(".cargo").join("bin").join("unly");
+    render_systemd_unit_with_paths(working_dir, &executable, &resolved_config_path)
+}
+
+fn render_systemd_unit_with_paths(
+    working_dir: &Path,
+    executable: &Path,
+    config_path: &Path,
+) -> Result<String> {
+    let rendered = BUNDLED_SYSTEMD_UNIT
+        .replace(
+            UNIT_WORKING_DIR_PLACEHOLDER,
+            &working_dir.display().to_string(),
+        )
+        .replace(
+            UNIT_EXECUTABLE_PLACEHOLDER,
+            &executable.display().to_string(),
+        )
+        .replace(
+            UNIT_CONFIG_PATH_PLACEHOLDER,
+            &config_path.display().to_string(),
+        );
+
+    for placeholder in [
+        UNIT_WORKING_DIR_PLACEHOLDER,
+        UNIT_EXECUTABLE_PLACEHOLDER,
+        UNIT_CONFIG_PATH_PLACEHOLDER,
+    ] {
+        if rendered.contains(placeholder) {
+            bail!("systemd template placeholder was not replaced: {placeholder}");
+        }
+    }
+
+    Ok(rendered)
+}
+
+fn resolve_config_path_for_unit(config_path: &Path, user_home: &Path) -> Result<PathBuf> {
+    let raw = config_path.to_string_lossy();
+    if raw == "~" {
+        return Ok(user_home.to_path_buf());
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(user_home.join(rest));
+    }
+    if config_path.is_absolute() {
+        return Ok(config_path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(config_path))
+        .context("resolving absolute config path for systemd unit")
+}
+
+fn resolve_invoking_user_home() -> Result<PathBuf> {
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        if !sudo_user.is_empty() {
+            if let Some(home) = lookup_home_dir_for_user(&sudo_user)? {
+                return Ok(home);
+            }
+        }
+    }
+
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .context("resolving HOME for systemd unit rendering")
+}
+
+fn lookup_home_dir_for_user(username: &str) -> Result<Option<PathBuf>> {
+    let output = match ProcessCommand::new("getent")
+        .args(["passwd", username])
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err).context("running getent to resolve home directory"),
+    };
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let line = String::from_utf8(output.stdout)
+        .context("decoding getent output as UTF-8")?
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    let home = line.split(':').nth(5).unwrap_or("").trim();
+    if home.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PathBuf::from(home)))
 }
 
 /// Create the system group and user `unly` if they do not already exist.
@@ -1465,13 +1565,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_systemd_unit_matches_bundled_template() {
-        let config_path = Path::new("/tmp/test-unly/config.toml");
-        let rendered =
-            render_systemd_unit(config_path).expect("render_systemd_unit should not fail");
-        assert_eq!(
-            rendered, BUNDLED_SYSTEMD_UNIT,
-            "rendered systemd unit must match bundled deploy template"
-        );
+    fn render_systemd_unit_replaces_placeholders() {
+        let rendered = render_systemd_unit_with_paths(
+            Path::new("/home/alice/.unly"),
+            Path::new("/home/alice/.cargo/bin/unly"),
+            Path::new("/home/alice/.unly/config.toml"),
+        )
+        .expect("render_systemd_unit_with_paths should not fail");
+
+        assert!(rendered.contains("WorkingDirectory=/home/alice/.unly"));
+        assert!(rendered.contains(
+            "ExecStart=/home/alice/.cargo/bin/unly start --config /home/alice/.unly/config.toml"
+        ));
+        assert!(!rendered.contains(UNIT_WORKING_DIR_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_EXECUTABLE_PLACEHOLDER));
+        assert!(!rendered.contains(UNIT_CONFIG_PATH_PLACEHOLDER));
     }
 }
