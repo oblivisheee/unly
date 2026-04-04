@@ -12,6 +12,14 @@
 
 ## Quick Start (Development)
 
+For end-user installation, you can use:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/oblivisheee/unly/main/install.sh)
+```
+
+The installer first tries GitHub Release binaries and automatically falls back to source build when no matching release asset exists.
+
 ### 1. Clone and build
 
 ```bash
