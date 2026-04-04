@@ -5,11 +5,11 @@ use tracing::{debug, warn};
 
 use unly_config::AppConfig;
 use unly_core::{
+    Result,
     model::{ChatMessage, ChatMessageContent, ChatRequest, StreamChunk},
     permissions::Permission,
     provider::Provider,
     tool::ToolContext,
-    Result,
 };
 use unly_memory::{MemoryQuery, MemoryScope, MemoryStore};
 use unly_plugins::{PluginLoader, SkillLoader};
@@ -827,13 +827,12 @@ impl AgentRuntime {
             }
         }
 
-        if self.config.enable_db_memory_augmentation {
-            if let Some(db_ctx) = self
+        if self.config.enable_db_memory_augmentation
+            && let Some(db_ctx) = self
                 .build_db_memory_context(ctx, user_msg, file_ctx.as_deref())
                 .await
-            {
-                contexts.push(db_ctx);
-            }
+        {
+            contexts.push(db_ctx);
         }
 
         if contexts.is_empty() {

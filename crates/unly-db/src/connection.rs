@@ -58,16 +58,16 @@ impl Database {
         let path = db_path.as_ref();
 
         // Ensure the parent directory exists.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    DbError::Config(format!(
-                        "failed to create database directory {}: {}",
-                        parent.display(),
-                        e
-                    ))
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                DbError::Config(format!(
+                    "failed to create database directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
         }
 
         let db_url = format!("sqlite://{}?mode=rwc", path.display());

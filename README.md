@@ -25,7 +25,7 @@ Unly is a Rust-based platform that turns any Telegram chat into an agentic AI as
 
 ## Install
 
-Run the installer — it handles Rust, the build, and the onboarding wizard in one step:
+Run the installer — it handles installation and onboarding in one step:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/oblivisheee/unly/main/install.sh)
@@ -44,7 +44,11 @@ Before running, you will need:
 - Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot)
 - A GitHub account with GitHub Copilot access *(or any OpenAI-compatible API key)*
 
-After the build completes, the onboarding wizard (`unly setup`) will guide you through the remaining steps.
+Installer behavior:
+- Tries to download a prebuilt binary from the latest GitHub Release.
+- Falls back to source build automatically if no matching release asset is available.
+
+After installation, the onboarding wizard (`unly setup`) will guide you through the remaining steps.
 It now fetches available models from the selected provider and lets you pick a default model from the fetched list (with manual fallback if listing fails).
 
 ## CLI Commands
@@ -56,6 +60,10 @@ unly setup
 unly start
 unly validate
 unly doctor
+unly service install
+unly service status
+unly uninstall
+unly uninstall-cli
 unly update --check
 unly update
 ```
@@ -65,6 +73,14 @@ Update command notes:
 - `unly update` — download and install the latest release binary.
 - `unly update --repo owner/repo` — check/install from a specific GitHub repository.
 - You can also set `UNLY_RELEASE_REPO=owner/repo`.
+
+Service command notes:
+- `unly service install` — install bundled `systemd` unit for Unly.
+- `unly service enable|disable|start|stop|restart|status` — manage service lifecycle.
+
+Uninstall command notes:
+- `unly uninstall` — remove workspace/config data.
+- `unly uninstall-cli` — remove CLI binary and installed systemd service (if present).
 
 ---
 
@@ -262,7 +278,6 @@ Repository includes a GitHub Actions workflow for mainline releases:
 - Trigger: `push` to `main` and manual `workflow_dispatch`
 - Builds release binaries for:
   - `x86_64-unknown-linux-gnu`
-  - `x86_64-apple-darwin`
   - `aarch64-apple-darwin`
 - Publishes GitHub Release assets consumed by `unly update`
 

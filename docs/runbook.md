@@ -4,7 +4,7 @@
 
 ### Check service health
 ```bash
-sudo systemctl status unly
+sudo /opt/unly/bin/unly service status
 sudo journalctl -u unly --since "1 hour ago" | grep -E "ERROR|WARN"
 ```
 
@@ -30,11 +30,11 @@ Via Telegram: `/jobs`
 
 ### Bot not responding
 
-1. Check service status: `sudo systemctl status unly`
+1. Check service status: `sudo /opt/unly/bin/unly service status`
 2. Check logs: `sudo journalctl -u unly -n 100`
 3. Check Telegram API connectivity: `curl -s https://api.telegram.org`
 4. Check provider health: `sudo -u unly /opt/unly/bin/unly doctor`
-5. Restart if needed: `sudo systemctl restart unly`
+5. Restart if needed: `sudo /opt/unly/bin/unly service restart`
 
 ### Provider authentication failure
 
@@ -44,12 +44,12 @@ Via Telegram: `/jobs`
 
 ### Database corruption
 
-1. Stop the service: `sudo systemctl stop unly`
+1. Stop the service: `sudo /opt/unly/bin/unly service stop`
 2. Check integrity: `sqlite3 /opt/unly/data/unly.sqlite "PRAGMA integrity_check;"`
 3. If corrupt, restore from backup:
    ```bash
    cp /backup/unly-YYYYMMDD.sqlite /opt/unly/data/unly.sqlite
-   sudo systemctl start unly
+   sudo /opt/unly/bin/unly service start
    ```
 
 ### Audit log review after security event
@@ -92,7 +92,7 @@ After upgrading:
 
 1. Edit `/etc/unly/config.toml`
 2. Validate: `sudo -u unly /opt/unly/bin/unly validate --config /etc/unly/config.toml`
-3. Reload: `sudo systemctl restart unly`
+3. Reload: `sudo /opt/unly/bin/unly service restart`
 
 ---
 

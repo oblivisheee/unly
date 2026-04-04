@@ -18,8 +18,8 @@
 
 set -euo pipefail
 
-REPO="oblivisheee/unly"
-REPO_URL="https://github.com/$REPO"
+RELEASE_REPO="${UNLY_RELEASE_REPO:-oblivisheee/unly}"
+REPO_URL="https://github.com/$RELEASE_REPO"
 PREBUILT_INSTALL_DIR="${UNLY_INSTALL_DIR:-$HOME/.local/bin}"
 LOCAL_ONLY=false
 
@@ -108,7 +108,7 @@ try_install_prebuilt() {
 
     require_cmd curl "Please install curl first."
 
-    local url="https://github.com/$REPO/releases/latest/download/unly-${target}"
+    local url="https://github.com/$RELEASE_REPO/releases/latest/download/unly-${target}"
     info "Downloading prebuilt binary for ${target}..."
     if ! curl -fsSL --output /tmp/unly-prebuilt "$url"; then
         warn "Download failed (URL: $url). Will use cargo install."

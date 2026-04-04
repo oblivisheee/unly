@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use unly_core::Result;
-use unly_plugins::{manifest::PluginManifest, plugin::Plugin, PluginRegistry};
+use unly_plugins::{PluginRegistry, manifest::PluginManifest, plugin::Plugin};
 
 struct MinimalPlugin {
     manifest: PluginManifest,

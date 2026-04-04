@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::info;
 
-use unly_core::{provider::Provider, types::HealthReport, Error, Result};
+use unly_core::{Error, Result, provider::Provider, types::HealthReport};
 
 /// Registry that holds all configured LLM providers.
 #[derive(Clone)]

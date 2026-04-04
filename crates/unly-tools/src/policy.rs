@@ -44,10 +44,10 @@ impl ExecutionPolicy {
             return false;
         }
         for pattern in &self.shell_allowlist {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if re.is_match(command) {
-                    return true;
-                }
+            if let Ok(re) = regex::Regex::new(pattern)
+                && re.is_match(command)
+            {
+                return true;
             }
         }
         false

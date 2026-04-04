@@ -52,16 +52,15 @@ sudo -u unly /opt/unly/bin/unly migrate --config /etc/unly/config.toml
 ### 7. Install and start the systemd service
 
 ```bash
-sudo cp deploy/unly.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable unly
-sudo systemctl start unly
+sudo /opt/unly/bin/unly service install --config /etc/unly/config.toml
+sudo /opt/unly/bin/unly service enable
+sudo /opt/unly/bin/unly service start
 ```
 
 ### 8. Verify
 
 ```bash
-sudo systemctl status unly
+sudo /opt/unly/bin/unly service status
 sudo journalctl -u unly -f
 ```
 
@@ -71,10 +70,10 @@ sudo journalctl -u unly -f
 
 ```bash
 cargo build --release
-sudo systemctl stop unly
+sudo /opt/unly/bin/unly service stop
 sudo install -m 755 target/release/unly /opt/unly/bin/unly
 sudo -u unly /opt/unly/bin/unly migrate --config /etc/unly/config.toml
-sudo systemctl start unly
+sudo /opt/unly/bin/unly service start
 ```
 
 ---

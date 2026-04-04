@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use unly_core::{tool::ToolSchema, Result};
+use unly_core::{Result, tool::ToolSchema};
 
 use crate::manifest::PluginManifest;
 

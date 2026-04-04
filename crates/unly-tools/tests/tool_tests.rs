@@ -2,8 +2,8 @@
 
 use serde_json::json;
 use unly_core::tool::{ToolContext, ToolRisk};
-use unly_tools::policy::ExecutionPolicy;
 use unly_tools::ToolRegistry;
+use unly_tools::policy::ExecutionPolicy;
 
 fn default_policy() -> ExecutionPolicy {
     ExecutionPolicy {

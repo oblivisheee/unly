@@ -1,7 +1,8 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
@@ -73,6 +74,10 @@ pub enum Commands {
     #[command(subcommand)]
     Job(JobCommands),
 
+    /// Manage Linux systemd service for Unly.
+    #[command(subcommand)]
+    Service(ServiceCommands),
+
     /// Run pending database migrations.
     Migrate,
 
@@ -96,6 +101,13 @@ pub enum Commands {
     /// Remove the entire Unly workspace (config, database, identity, cache).
     Uninstall {
         /// Skip all confirmation prompts.
+        #[arg(long)]
+        skip: bool,
+    },
+
+    /// Remove the `unly` CLI binary and installed systemd service (if present).
+    UninstallCli {
+        /// Skip confirmation prompt.
         #[arg(long)]
         skip: bool,
     },
@@ -147,6 +159,28 @@ pub enum JobCommands {
     Enable { id: String },
     /// Disable a job.
     Disable { id: String },
+}
+
+#[derive(Subcommand)]
+pub enum ServiceCommands {
+    /// Install /etc/systemd/system/unly.service from bundled template.
+    Install {
+        /// Overwrite existing unit file if it already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Enable service auto-start on boot.
+    Enable,
+    /// Disable service auto-start on boot.
+    Disable,
+    /// Start the service now.
+    Start,
+    /// Stop the service now.
+    Stop,
+    /// Restart the service.
+    Restart,
+    /// Show service status.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -519,6 +553,11 @@ impl Cli {
                 Ok(())
             }
 
+            Commands::Service(cmd) => {
+                init_logging("info", false);
+                run_service_command(cmd, &config_path)
+            }
+
             Commands::Migrate => {
                 init_logging("info", false);
                 let config = load_config(&config_path).context("loading config")?;
@@ -623,6 +662,7 @@ impl Cli {
             }
 
             Commands::Uninstall { skip } => run_uninstall_wizard(skip, &config_path).await,
+            Commands::UninstallCli { skip } => run_uninstall_cli(skip),
 
             Commands::Update { check, repo } => {
                 if check {
@@ -1031,7 +1071,6 @@ fn model_rank(model_id: &str) -> u8 {
 async fn run_uninstall_wizard(skip: bool, config_path: &Path) -> Result<()> {
     let theme = ColorfulTheme::default();
     let workspace_dir = workspace::workspace_dir();
-    let binary_path = cargo_unly_binary_path();
     let custom_config_outside_workspace =
         config_path.exists() && !config_path.starts_with(&workspace_dir);
 
@@ -1044,14 +1083,11 @@ async fn run_uninstall_wizard(skip: bool, config_path: &Path) -> Result<()> {
     if custom_config_outside_workspace {
         println!("And custom config file:\n  {}", config_path.display());
     }
-    if binary_path.exists() {
-        println!("And binary:\n  {}", binary_path.display());
-    }
 
-    let any_target_exists =
-        workspace_dir.exists() || custom_config_outside_workspace || binary_path.exists();
+    let any_target_exists = workspace_dir.exists() || custom_config_outside_workspace;
     if !any_target_exists {
         println!("Nothing to remove.");
+        println!("To remove the CLI binary itself, run: unly uninstall-cli");
         return Ok(());
     }
 
@@ -1088,12 +1124,79 @@ async fn run_uninstall_wizard(skip: bool, config_path: &Path) -> Result<()> {
             .with_context(|| format!("removing custom config {}", config_path.display()))?;
         println!("Custom config removed: {}", config_path.display());
     }
-    if binary_path.exists() {
-        remove_path_if_exists(&binary_path)
-            .with_context(|| format!("removing binary {}", binary_path.display()))?;
-        println!("Binary removed: {}", binary_path.display());
+    println!("\nWorkspace cleanup complete.");
+    println!("To remove the CLI binary itself, run: unly uninstall-cli");
+
+    Ok(())
+}
+
+fn run_uninstall_cli(skip: bool) -> Result<()> {
+    let theme = ColorfulTheme::default();
+    let cargo_path = cargo_unly_binary_path();
+    let current_exe = std::env::current_exe().ok();
+    let service_unit_path = PathBuf::from("/etc/systemd/system").join(SYSTEMD_UNIT_NAME);
+
+    let mut candidates = vec![cargo_path];
+    if let Some(current) = current_exe
+        && !candidates.iter().any(|p| p == &current)
+    {
+        candidates.push(current);
     }
 
+    let existing: Vec<PathBuf> = candidates.into_iter().filter(|p| p.exists()).collect();
+
+    println!("\nUnly CLI Uninstall");
+    println!("{}", "=".repeat(50));
+    if existing.is_empty() {
+        println!("No CLI binary found in known locations.");
+        println!("If installed with Cargo, run: cargo uninstall unly-cli");
+        return Ok(());
+    }
+
+    println!("This will remove the CLI binary from:");
+    for path in &existing {
+        println!("  {}", path.display());
+    }
+    if service_unit_path.exists() {
+        println!(
+            "And remove systemd service:\n  {}",
+            service_unit_path.display()
+        );
+    }
+
+    if !skip {
+        let confirm = Confirm::with_theme(&theme)
+            .with_prompt("Remove CLI binaries and related service now?")
+            .default(false)
+            .interact()?;
+        if !confirm {
+            println!("CLI uninstall cancelled.");
+            return Ok(());
+        }
+    }
+
+    if remove_systemd_service_if_exists()? {
+        println!("Systemd service removed: {}", service_unit_path.display());
+    }
+
+    let mut failed = false;
+    for path in &existing {
+        match remove_path_if_exists(path) {
+            Ok(()) => println!("CLI binary removed: {}", path.display()),
+            Err(err) => {
+                failed = true;
+                eprintln!("Failed to remove {}: {}", path.display(), err);
+            }
+        }
+    }
+
+    if failed {
+        bail!(
+            "CLI uninstall was not fully completed. If installed with Cargo, run `cargo uninstall unly-cli`."
+        );
+    }
+
+    println!("CLI uninstall complete.");
     Ok(())
 }
 
@@ -1119,6 +1222,154 @@ fn cargo_unly_binary_path() -> PathBuf {
                 .join(".cargo")
         });
     cargo_home.join("bin").join("unly")
+}
+
+const BUNDLED_SYSTEMD_UNIT: &str = include_str!("../../../deploy/unly.service");
+const SYSTEMD_UNIT_NAME: &str = "unly.service";
+
+fn run_service_command(cmd: ServiceCommands, config_path: &Path) -> Result<()> {
+    ensure_systemd_available()?;
+    match cmd {
+        ServiceCommands::Install { force } => install_systemd_service(force, config_path),
+        ServiceCommands::Enable => run_systemctl(&["enable", "unly"]),
+        ServiceCommands::Disable => run_systemctl(&["disable", "unly"]),
+        ServiceCommands::Start => run_systemctl(&["start", "unly"]),
+        ServiceCommands::Stop => run_systemctl(&["stop", "unly"]),
+        ServiceCommands::Restart => run_systemctl(&["restart", "unly"]),
+        ServiceCommands::Status => run_systemctl(&["status", "unly", "--no-pager"]),
+    }
+}
+
+fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
+    let unit_path = PathBuf::from("/etc/systemd/system").join(SYSTEMD_UNIT_NAME);
+    if unit_path.exists() && !force {
+        bail!(
+            "service unit already exists at {}. Use `unly service install --force` to overwrite.",
+            unit_path.display()
+        );
+    }
+
+    let rendered = render_systemd_unit(config_path)?;
+    std::fs::write(&unit_path, rendered)
+        .with_context(|| format!("writing systemd unit file {}", unit_path.display()))?;
+
+    run_systemctl(&["daemon-reload"])?;
+    println!("Installed systemd service: {}", unit_path.display());
+    println!("Next: unly service enable && unly service start");
+    Ok(())
+}
+
+fn render_systemd_unit(config_path: &Path) -> Result<String> {
+    let current_exe = std::env::current_exe().context("resolving current executable path")?;
+    let workdir = workspace::workspace_dir();
+    let mut out = String::new();
+
+    for line in BUNDLED_SYSTEMD_UNIT.lines() {
+        if line.starts_with("WorkingDirectory=") {
+            out.push_str(&format!("WorkingDirectory={}\n", workdir.display()));
+        } else if line.starts_with("ExecStart=") {
+            out.push_str(&format!(
+                "ExecStart={} start --config {}\n",
+                current_exe.display(),
+                config_path.display()
+            ));
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    Ok(out)
+}
+
+fn ensure_systemd_available() -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        bail!("`unly service` is supported only on Linux with systemd");
+    }
+    if !Path::new("/run/systemd/system").exists() {
+        bail!("systemd runtime not detected at /run/systemd/system");
+    }
+    let output = ProcessCommand::new("systemctl")
+        .arg("--version")
+        .output()
+        .context("checking `systemctl` availability")?;
+    if !output.status.success() {
+        bail!("`systemctl` is not available on this system");
+    }
+    Ok(())
+}
+
+fn run_systemctl(args: &[&str]) -> Result<()> {
+    let output = ProcessCommand::new("systemctl")
+        .args(args)
+        .output()
+        .with_context(|| format!("running `systemctl {}`", args.join(" ")))?;
+    if output.status.success() {
+        if !output.stdout.is_empty() {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() { stderr } else { stdout };
+    bail!(
+        "systemctl {} failed{}",
+        args.join(" "),
+        if details.is_empty() {
+            "".to_string()
+        } else {
+            format!(": {}", details)
+        }
+    );
+}
+
+fn remove_systemd_service_if_exists() -> Result<bool> {
+    if !cfg!(target_os = "linux") {
+        return Ok(false);
+    }
+    let unit_path = PathBuf::from("/etc/systemd/system").join(SYSTEMD_UNIT_NAME);
+    if !unit_path.exists() {
+        return Ok(false);
+    }
+
+    ensure_systemd_available()?;
+
+    run_systemctl_allow_failure(&["stop", "unly"])?;
+    run_systemctl_allow_failure(&["disable", "unly"])?;
+    remove_path_if_exists(&unit_path)
+        .with_context(|| format!("removing systemd unit file {}", unit_path.display()))?;
+    run_systemctl(&["daemon-reload"])?;
+    run_systemctl_allow_failure(&["reset-failed", "unly"])?;
+
+    Ok(true)
+}
+
+fn run_systemctl_allow_failure(args: &[&str]) -> Result<()> {
+    let output = ProcessCommand::new("systemctl")
+        .args(args)
+        .output()
+        .with_context(|| format!("running `systemctl {}`", args.join(" ")))?;
+    if output.status.success() {
+        if !output.stdout.is_empty() {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() { stderr } else { stdout };
+    eprintln!(
+        "Warning: systemctl {} failed{}",
+        args.join(" "),
+        if details.is_empty() {
+            "".to_string()
+        } else {
+            format!(": {}", details)
+        }
+    );
+    Ok(())
 }
 
 /// Print a table of skills or plugins to stdout.

@@ -10,8 +10,8 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use unly_db::{
-    repo::job::{JobRow, JobRunRow},
     Database,
+    repo::job::{JobRow, JobRunRow},
 };
 
 use crate::job::JobDefinition;

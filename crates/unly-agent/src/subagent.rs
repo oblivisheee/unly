@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex};
-use tokio::sync::watch;
 use tokio::sync::Semaphore;
+use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::info;
 
 use sea_orm::{ActiveModelTrait, ConnectionTrait, DatabaseBackend, Set, Statement};
-use unly_core::{ids::AgentId, permissions::PermissionSet, types::ExecutionStatus, Result};
-use unly_db::entity::subagents;
+use unly_core::{Result, ids::AgentId, permissions::PermissionSet, types::ExecutionStatus};
 use unly_db::Database;
+use unly_db::entity::subagents;
 
 use crate::context::AgentContext;
 use crate::runtime::{AgentResponse, AgentRuntime};
@@ -380,10 +380,10 @@ This subagent completed partial work up to this point; review the logs for progr
     }
 
     pub async fn stop_subagent(&self, subagent_id: &str) -> Result<()> {
-        if let Ok(mut tasks) = SUBAGENT_TASKS.lock() {
-            if let Some(handle) = tasks.remove(subagent_id) {
-                handle.abort();
-            }
+        if let Ok(mut tasks) = SUBAGENT_TASKS.lock()
+            && let Some(handle) = tasks.remove(subagent_id)
+        {
+            handle.abort();
         }
         let finished = chrono::Utc::now().to_rfc3339();
         self.db
@@ -420,10 +420,10 @@ This subagent completed partial work up to this point; review the logs for progr
             ),
         );
         let row = self.db.conn().query_one(stmt).await.ok().flatten();
-        if let Some(r) = row {
-            if let Ok(cnt) = r.try_get::<i64>("", "cnt") {
-                return cnt.max(0) as u64;
-            }
+        if let Some(r) = row
+            && let Ok(cnt) = r.try_get::<i64>("", "cnt")
+        {
+            return cnt.max(0) as u64;
         }
         0
     }

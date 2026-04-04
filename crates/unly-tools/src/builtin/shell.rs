@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use once_cell::sync::Lazy;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -11,8 +11,8 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use unly_core::{
-    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
     Result,
+    tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
 };
 
 /// Tool: execute a shell command.
@@ -58,10 +58,10 @@ impl ShellTool {
             return false;
         }
         for pattern in &self.allowlist {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                if re.is_match(command) {
-                    return true;
-                }
+            if let Ok(re) = regex::Regex::new(pattern)
+                && re.is_match(command)
+            {
+                return true;
             }
         }
         false
@@ -260,28 +260,28 @@ impl Tool for ShellTool {
                 let finished_at = Utc::now().to_rfc3339();
                 match cmd.output().await {
                     Ok(output) => {
-                        if let Ok(mut jobs) = BASH_JOBS.lock() {
-                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
-                                job.status = if output.status.success() {
-                                    "completed".to_string()
-                                } else {
-                                    "failed".to_string()
-                                };
-                                job.finished_at = Some(finished_at);
-                                job.exit_code = output.status.code();
-                                job.stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                                job.stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                            }
+                        if let Ok(mut jobs) = BASH_JOBS.lock()
+                            && let Some(job) = jobs.get_mut(&job_id_for_task)
+                        {
+                            job.status = if output.status.success() {
+                                "completed".to_string()
+                            } else {
+                                "failed".to_string()
+                            };
+                            job.finished_at = Some(finished_at);
+                            job.exit_code = output.status.code();
+                            job.stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            job.stderr = String::from_utf8_lossy(&output.stderr).to_string();
                         }
                     }
                     Err(e) => {
-                        if let Ok(mut jobs) = BASH_JOBS.lock() {
-                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
-                                job.status = "failed".to_string();
-                                job.finished_at = Some(finished_at);
-                                job.exit_code = Some(1);
-                                job.stderr = e.to_string();
-                            }
+                        if let Ok(mut jobs) = BASH_JOBS.lock()
+                            && let Some(job) = jobs.get_mut(&job_id_for_task)
+                        {
+                            job.status = "failed".to_string();
+                            job.finished_at = Some(finished_at);
+                            job.exit_code = Some(1);
+                            job.stderr = e.to_string();
                         }
                     }
                 }
@@ -404,28 +404,28 @@ impl Tool for BashTool {
                 let finished_at = Utc::now().to_rfc3339();
                 match cmd.output().await {
                     Ok(output) => {
-                        if let Ok(mut jobs) = BASH_JOBS.lock() {
-                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
-                                job.status = if output.status.success() {
-                                    "completed".to_string()
-                                } else {
-                                    "failed".to_string()
-                                };
-                                job.finished_at = Some(finished_at);
-                                job.exit_code = output.status.code();
-                                job.stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                                job.stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                            }
+                        if let Ok(mut jobs) = BASH_JOBS.lock()
+                            && let Some(job) = jobs.get_mut(&job_id_for_task)
+                        {
+                            job.status = if output.status.success() {
+                                "completed".to_string()
+                            } else {
+                                "failed".to_string()
+                            };
+                            job.finished_at = Some(finished_at);
+                            job.exit_code = output.status.code();
+                            job.stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                            job.stderr = String::from_utf8_lossy(&output.stderr).to_string();
                         }
                     }
                     Err(e) => {
-                        if let Ok(mut jobs) = BASH_JOBS.lock() {
-                            if let Some(job) = jobs.get_mut(&job_id_for_task) {
-                                job.status = "failed".to_string();
-                                job.finished_at = Some(finished_at);
-                                job.exit_code = Some(1);
-                                job.stderr = e.to_string();
-                            }
+                        if let Ok(mut jobs) = BASH_JOBS.lock()
+                            && let Some(job) = jobs.get_mut(&job_id_for_task)
+                        {
+                            job.status = "failed".to_string();
+                            job.finished_at = Some(finished_at);
+                            job.exit_code = Some(1);
+                            job.stderr = e.to_string();
                         }
                     }
                 }
