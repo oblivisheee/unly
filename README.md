@@ -77,6 +77,7 @@ Update command notes:
 Service command notes:
 - `unly service install` — install bundled `systemd` unit for Unly.
 - `unly service enable|disable|start|stop|restart|status` — manage service lifecycle.
+- Service commands auto-elevate with `sudo` when needed (you will be prompted for your root password).
 
 Uninstall command notes:
 - `unly uninstall` — remove workspace/config data.
