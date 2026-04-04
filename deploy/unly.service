@@ -11,7 +11,7 @@ Type=simple
 User=unly
 Group=unly
 WorkingDirectory=/opt/unly
-ExecStart=/opt/unly/bin/unly start --config /etc/unly/config.toml
+ExecStart=/opt/unly/bin/unly start --config /opt/unly/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=10
@@ -28,8 +28,10 @@ SyslogIdentifier=unly
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/opt/unly/data /var/log/unly
+# ProtectHome must remain false when the workspace lives inside the user home
+# directory (the default: ~/.unly).  Enabling read-only breaks database writes.
+ProtectHome=false
+ReadWritePaths=/opt/unly
 CapabilityBoundingSet=
 AmbientCapabilities=
 

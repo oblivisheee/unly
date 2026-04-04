@@ -1270,6 +1270,12 @@ fn install_systemd_service(force: bool, config_path: &Path) -> Result<()> {
 fn render_systemd_unit(config_path: &Path) -> Result<String> {
     let current_exe = std::env::current_exe().context("resolving current executable path")?;
     let workdir = workspace::workspace_dir();
+
+    // Resolve the username that will own/run the service.  We prefer the
+    // login name reported by the OS; fall back to the numeric UID string so
+    // the unit is always valid.
+    let username = current_username();
+
     let mut out = String::new();
 
     for line in BUNDLED_SYSTEMD_UNIT.lines() {
@@ -1281,12 +1287,68 @@ fn render_systemd_unit(config_path: &Path) -> Result<String> {
                 current_exe.display(),
                 config_path.display()
             ));
+        } else if line.starts_with("User=") {
+            out.push_str(&format!("User={username}\n"));
+        } else if line.starts_with("Group=") {
+            out.push_str(&format!("Group={username}\n"));
+        } else if line.starts_with("ReadWritePaths=") {
+            // Grant write access to the entire workspace directory so that the
+            // database, token cache, and all runtime files remain writable even
+            // when ProtectSystem=strict is active.
+            out.push_str(&format!("ReadWritePaths={}\n", workdir.display()));
+        } else if line.starts_with("ProtectHome=") {
+            // The default workspace lives inside the user home directory
+            // (~/.unly).  Keeping ProtectHome=read-only would prevent the
+            // database from being opened for writes, causing an immediate
+            // exit-code failure.  Set it to false so home is accessible.
+            out.push_str("ProtectHome=false\n");
         } else {
             out.push_str(line);
             out.push('\n');
         }
     }
     Ok(out)
+}
+
+/// Return the login name of the process owner, or fall back to the UID string.
+fn current_username() -> String {
+    // Prefer the output of `id -un` — it reflects the actual OS user and
+    // cannot be spoofed by environment variable manipulation.
+    if let Ok(output) = ProcessCommand::new("id").arg("-un").output()
+        && output.status.success()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+
+    // Fall back to well-known PAM environment variables only when `id` is
+    // not available (unusual, but possible in minimal containers).
+    if let Ok(name) = std::env::var("LOGNAME")
+        && !name.is_empty()
+    {
+        return name;
+    }
+    if let Ok(name) = std::env::var("USER")
+        && !name.is_empty()
+    {
+        return name;
+    }
+
+    // Numeric UID is always accepted in a systemd User= directive.
+    if let Ok(output) = ProcessCommand::new("id").arg("-u").output()
+        && output.status.success()
+    {
+        let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !uid.is_empty() {
+            return uid;
+        }
+    }
+
+    // Last-resort: 'nobody' is a non-privileged account present on virtually
+    // every Linux system and is safer than defaulting to 'root'.
+    "nobody".to_string()
 }
 
 fn ensure_systemd_available() -> Result<()> {
@@ -1424,5 +1486,79 @@ fn print_ext_table(
     for (name, enabled, description) in &rows {
         let status = if *enabled { "enabled" } else { "disabled" };
         println!("{:<30} {:<10} {}", name, status, description);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_username_is_non_empty() {
+        let name = current_username();
+        assert!(!name.is_empty(), "current_username() must return a non-empty string");
+    }
+
+    #[test]
+    fn render_systemd_unit_replaces_all_dynamic_fields() {
+        let config_path = Path::new("/tmp/test-unly/config.toml");
+        let rendered = render_systemd_unit(config_path)
+            .expect("render_systemd_unit should not fail");
+
+        // ExecStart must point to the actual binary and config path.
+        assert!(
+            rendered.contains("ExecStart="),
+            "rendered unit must contain ExecStart="
+        );
+        assert!(
+            rendered.contains("--config /tmp/test-unly/config.toml"),
+            "rendered ExecStart must embed config_path"
+        );
+
+        // WorkingDirectory must be replaced with workspace_dir(), not the
+        // hardcoded /opt/unly placeholder from the template.
+        assert!(
+            !rendered.contains("WorkingDirectory=/opt/unly"),
+            "rendered unit must not contain hardcoded WorkingDirectory=/opt/unly"
+        );
+
+        // User= and Group= must be replaced with the current user, not "unly".
+        assert!(
+            !rendered.contains("User=unly\n"),
+            "rendered unit must not contain hardcoded User=unly"
+        );
+        assert!(
+            !rendered.contains("Group=unly\n"),
+            "rendered unit must not contain hardcoded Group=unly"
+        );
+        let username = current_username();
+        assert!(
+            rendered.contains(&format!("User={username}\n")),
+            "rendered unit must contain User=<current_user>"
+        );
+        assert!(
+            rendered.contains(&format!("Group={username}\n")),
+            "rendered unit must contain Group=<current_user>"
+        );
+
+        // ReadWritePaths must not reference /opt/unly/data or /var/log/unly.
+        assert!(
+            !rendered.contains("/opt/unly/data"),
+            "rendered unit must not contain hardcoded ReadWritePaths /opt/unly/data"
+        );
+        assert!(
+            !rendered.contains("/var/log/unly"),
+            "rendered unit must not reference non-existent /var/log/unly"
+        );
+
+        // ProtectHome must be false so that the workspace inside home is writable.
+        assert!(
+            rendered.contains("ProtectHome=false\n"),
+            "rendered unit must have ProtectHome=false to allow writes inside home"
+        );
+        assert!(
+            !rendered.contains("ProtectHome=read-only"),
+            "rendered unit must not have ProtectHome=read-only"
+        );
     }
 }
