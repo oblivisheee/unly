@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 use unly_config::AppConfig;
 use unly_core::{
     Result,
-    model::{ChatMessage, ChatMessageContent, ChatRequest, StreamChunk},
+    model::{ChatMessage, ChatMessageContent, ChatRequest, ContentPart, StreamChunk},
     permissions::Permission,
     provider::Provider,
     tool::ToolContext,
@@ -114,7 +114,7 @@ impl AgentRuntime {
     ) -> Result<AgentResponse> {
         ctx.system_prompt = self.build_system_prompt_with_hot_reload();
         let user_msg = user_input_for_memory(&user_input);
-        let memory_ctx = self.build_memory_context(ctx, &user_msg).await;
+        let mut memory_ctx = self.build_memory_context(ctx, &user_msg).await;
         let user_msg_for_memory = user_msg.clone();
 
         ctx.push_message(ChatMessage {
@@ -135,6 +135,7 @@ impl AgentRuntime {
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
         let mut provider_retry_count = 0u32;
+        let mut prompt_compression_round = 0u32;
         let preapproved_tools = matches!(ctx.tool_approval_override, Some(true))
             || (ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools));
         let force_tool_approval = matches!(ctx.tool_approval_override, Some(false));
@@ -171,6 +172,25 @@ impl AgentRuntime {
                     resp
                 }
                 Err(e) => {
+                    if let Some(limit) = parse_prompt_token_limit(&e)
+                        && compress_context_for_token_limit(
+                            ctx,
+                            &mut memory_ctx,
+                            limit,
+                            prompt_compression_round,
+                        )
+                    {
+                        prompt_compression_round += 1;
+                        provider_retry_count = 0;
+                        ctx.log_thinking(
+                            "prompt_compression",
+                            format!(
+                                "prompt exceeded model limit ({} tokens); compressed context (round {})",
+                                limit, prompt_compression_round
+                            ),
+                        );
+                        continue;
+                    }
                     provider_retry_count += 1;
                     if provider_retry_count <= 2 {
                         ctx.log_thinking(
@@ -271,7 +291,7 @@ impl AgentRuntime {
                                 format!(
                                     "{}: {}",
                                     tc.function.name,
-                                    &content[..content.len().min(200)]
+                                    truncate_to_chars(&content, 200)
                                 ),
                             );
 
@@ -398,7 +418,7 @@ impl AgentRuntime {
     ) -> Result<()> {
         ctx.system_prompt = self.build_system_prompt_with_hot_reload();
         let user_msg = user_input_for_memory(&user_input);
-        let memory_ctx = self.build_memory_context(ctx, &user_msg).await;
+        let mut memory_ctx = self.build_memory_context(ctx, &user_msg).await;
         let user_msg_for_memory = user_msg.clone();
 
         ctx.push_message(ChatMessage {
@@ -419,6 +439,7 @@ impl AgentRuntime {
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
         let mut provider_retry_count = 0u32;
+        let mut prompt_compression_round = 0u32;
         let preapproved_tools = matches!(ctx.tool_approval_override, Some(true))
             || (ctx.subagent_depth > 0 && ctx.permissions.has(&Permission::ExecutePrivilegedTools));
         let force_tool_approval = matches!(ctx.tool_approval_override, Some(false));
@@ -455,6 +476,25 @@ impl AgentRuntime {
                     resp
                 }
                 Err(e) => {
+                    if let Some(limit) = parse_prompt_token_limit(&e)
+                        && compress_context_for_token_limit(
+                            ctx,
+                            &mut memory_ctx,
+                            limit,
+                            prompt_compression_round,
+                        )
+                    {
+                        prompt_compression_round += 1;
+                        provider_retry_count = 0;
+                        ctx.log_thinking(
+                            "prompt_compression",
+                            format!(
+                                "prompt exceeded model limit ({} tokens); compressed context (round {})",
+                                limit, prompt_compression_round
+                            ),
+                        );
+                        continue;
+                    }
                     provider_retry_count += 1;
                     if provider_retry_count <= 2 {
                         ctx.log_thinking(
@@ -543,7 +583,7 @@ impl AgentRuntime {
                                 format!(
                                     "{}: {}",
                                     tc.function.name,
-                                    &content[..content.len().min(200)]
+                                    truncate_to_chars(&content, 200)
                                 ),
                             );
                             ctx.push_message(ChatMessage {
@@ -968,11 +1008,7 @@ impl AgentRuntime {
                 .memory_context_max_chars_per_item
                 .min(self.config.file_memory_max_chars_per_file.max(1))
                 .max(1);
-            let trimmed = if text.len() > max_item {
-                format!("{}…", &text[..max_item])
-            } else {
-                text
-            };
+            let trimmed = truncate_to_chars(&text, max_item);
             total_chars += trimmed.len();
             if total_chars > self.config.memory_context_max_total_chars {
                 break;
@@ -1002,11 +1038,7 @@ impl AgentRuntime {
 
         let base_content = format!("User: {}\nAssistant: {}", user_clean, assistant_clean);
         let max_len = self.config.memory_store_max_chars_per_turn.max(64);
-        let content = if base_content.len() > max_len {
-            base_content[..max_len].to_string()
-        } else {
-            base_content
-        };
+        let content = truncate_to_chars(&base_content, max_len);
 
         let metadata = serde_json::json!({
             "kind": "conversation_turn",
@@ -1322,6 +1354,91 @@ fn parse_markdown_links(text: &str) -> Vec<String> {
     out
 }
 
+fn parse_prompt_token_limit(err: &unly_core::Error) -> Option<usize> {
+    let unly_core::Error::Provider { message, .. } = err else {
+        return None;
+    };
+    let marker = "limit of ";
+    let start = message.find(marker)? + marker.len();
+    let digits: String = message[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse::<usize>().ok()
+    }
+}
+
+fn compress_context_for_token_limit(
+    ctx: &mut AgentContext,
+    memory_ctx: &mut Option<String>,
+    token_limit: usize,
+    round: u32,
+) -> bool {
+    let mut changed = false;
+    if memory_ctx.is_some() {
+        *memory_ctx = None;
+        changed = true;
+    }
+
+    let per_message_cap = match round {
+        0 => (token_limit / 16).clamp(800, 6000),
+        1 => (token_limit / 24).clamp(500, 3000),
+        _ => (token_limit / 32).clamp(300, 1600),
+    };
+
+    for msg in &mut ctx.messages {
+        if compact_message_content(&mut msg.content, per_message_cap) {
+            changed = true;
+        }
+    }
+
+    let keep = match round {
+        0 => 24,
+        1 => 16,
+        _ => 10,
+    };
+    if ctx.messages.len() > keep {
+        let remove = ctx.messages.len() - keep;
+        ctx.messages.drain(0..remove);
+        changed = true;
+    }
+
+    changed
+}
+
+fn compact_message_content(content: &mut ChatMessageContent, max_chars: usize) -> bool {
+    match content {
+        ChatMessageContent::Text(text) => {
+            if text.len() <= max_chars {
+                return false;
+            }
+            *text = format!(
+                "{}\n[truncated by runtime]",
+                truncate_to_chars(text, max_chars)
+            );
+            true
+        }
+        ChatMessageContent::Parts(parts) => {
+            let mut changed = false;
+            for part in parts {
+                if let ContentPart::Text { text } = part
+                    && text.len() > max_chars
+                {
+                    *text = format!(
+                        "{}\n[truncated by runtime]",
+                        truncate_to_chars(text, max_chars)
+                    );
+                    changed = true;
+                }
+            }
+            changed
+        }
+    }
+}
+
 fn build_semantic_query(user_msg: &str, file_ctx: Option<&str>) -> String {
     if let Some(ctx) = file_ctx {
         let compact = truncate_to_chars(&ctx.replace('\n', " "), 360);
@@ -1342,4 +1459,58 @@ fn strip_html_tags(text: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unly_core::{ids::ChatId, permissions::PermissionSet};
+
+    #[test]
+    fn parse_prompt_token_limit_extracts_numeric_limit() {
+        let err = unly_core::Error::provider(
+            "copilot",
+            r#"HTTP 400 — {"message":"prompt token count of 107239 exceeds the limit of 64000","code":"model_max_prompt_tokens_exceeded"}"#,
+        );
+        assert_eq!(parse_prompt_token_limit(&err), Some(64_000));
+    }
+
+    #[test]
+    fn truncate_to_chars_handles_multibyte_boundaries() {
+        let text = "─".repeat(80);
+        let truncated = truncate_to_chars(&text, 200);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn compression_drops_memory_and_shrinks_history() {
+        let mut ctx = AgentContext::new(
+            ChatId::new(),
+            None,
+            PermissionSet::basic_user(),
+            "copilot",
+            "gpt-5",
+            "system",
+        );
+        for i in 0..30 {
+            ctx.push_message(ChatMessage {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.to_string(),
+                content: ChatMessageContent::Text("─".repeat(7_000)),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            });
+        }
+
+        let mut memory_ctx = Some("large memory context".repeat(500));
+        let changed = compress_context_for_token_limit(&mut ctx, &mut memory_ctx, 64_000, 0);
+
+        assert!(changed);
+        assert!(memory_ctx.is_none());
+        assert!(ctx.messages.len() <= 24);
+        assert!(ctx.messages.iter().any(|m| matches!(
+            &m.content,
+            ChatMessageContent::Text(t) if t.contains("[truncated by runtime]")
+        )));
+    }
 }
