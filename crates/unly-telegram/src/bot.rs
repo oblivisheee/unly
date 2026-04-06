@@ -2813,6 +2813,38 @@ async fn send_media(
                 req.await?;
             }
         }
+        MediaKind::Video => {
+            let req = bot.send_video(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+        MediaKind::Audio => {
+            let req = bot.send_audio(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+        MediaKind::Voice => {
+            let req = bot.send_voice(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
+        MediaKind::Animation => {
+            let req = bot.send_animation(chat_id, input);
+            if let Some(caption) = caption {
+                req.caption(caption.to_string()).await?;
+            } else {
+                req.await?;
+            }
+        }
     }
     Ok(())
 }

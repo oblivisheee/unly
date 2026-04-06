@@ -235,7 +235,7 @@ impl Cli {
                     db.clone(),
                     Some(audit.clone()),
                 );
-                let sessions = SessionStore::new();
+                let sessions = SessionStore::new(Duration::from_secs(6 * 60 * 60));
 
                 let config_arc = Arc::new(config);
                 let bot = Arc::new(TelegramBot::new(

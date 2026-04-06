@@ -18,7 +18,7 @@ use unly_core::{
     Result,
     tool::{Tool, ToolContext, ToolResult, ToolRisk, ToolSchema},
 };
-use unly_plugins::{PluginLoader, SkillLoader, build_frontmatter};
+use unly_plugins::{PluginLoader, Skill, SkillLoader, build_frontmatter};
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 
@@ -51,6 +51,24 @@ fn build_md_content(name: &str, args: &Value) -> String {
 
     let frontmatter = build_frontmatter(name, &description, &version, &author);
     format!("{}\n{}\n", frontmatter, instructions)
+}
+
+fn skill_id(skill: &Skill) -> String {
+    skill
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(skill.meta.name.as_str())
+        .to_string()
+}
+
+fn usage_hint(instructions: &str) -> String {
+    instructions
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---"))
+        .map(|l| l.chars().take(160).collect::<String>())
+        .unwrap_or_default()
 }
 
 // ── skill_list ────────────────────────────────────────────────────────────────
@@ -106,6 +124,199 @@ impl Tool for SkillListTool {
         Ok(ToolResult::success(
             ctx.tool_call_id.clone(),
             lines.join("\n"),
+            start.elapsed().as_millis() as u64,
+        ))
+    }
+}
+
+// ── skill_inspect ─────────────────────────────────────────────────────────────
+
+/// Inspect one skill in detail (metadata + full instructions).
+pub struct SkillInspectTool {
+    pub skills_dir: PathBuf,
+}
+
+#[async_trait]
+impl Tool for SkillInspectTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "skill_inspect".to_string(),
+            description:
+                "Show detailed information for one skill by id or name, including full instructions."
+                    .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Skill directory id or skill name." }
+                },
+                "required": ["id"]
+            }),
+            risk: ToolRisk::Safe,
+            requires_approval: false,
+        }
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let start = Instant::now();
+        let id = match args.get("id").and_then(|v| v.as_str()) {
+            Some(v) if !v.trim().is_empty() => v.trim(),
+            _ => {
+                return Ok(ToolResult::error(
+                    ctx.tool_call_id.clone(),
+                    "missing required argument: 'id'",
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+        };
+
+        let skills = SkillLoader::load_from_dir(&self.skills_dir);
+        let Some(skill) = skills
+            .into_iter()
+            .find(|s| skill_id(s) == id || s.meta.name == id)
+        else {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                format!("skill '{}' not found", id),
+                start.elapsed().as_millis() as u64,
+            ));
+        };
+
+        let status = if skill.enabled { "enabled" } else { "disabled" };
+        let out = format!(
+            "id: {}\nname: {}\nstatus: {}\ndescription: {}\npath: {}\n\ninstructions:\n{}",
+            skill_id(&skill),
+            skill.meta.name,
+            status,
+            if skill.meta.description.is_empty() {
+                "(no description)"
+            } else {
+                skill.meta.description.as_str()
+            },
+            skill.path.display(),
+            skill.instructions.trim()
+        );
+        Ok(ToolResult::success(
+            ctx.tool_call_id.clone(),
+            out,
+            start.elapsed().as_millis() as u64,
+        ))
+    }
+}
+
+// ── skill_search ──────────────────────────────────────────────────────────────
+
+/// Search skills by query in id/name/description/instructions.
+pub struct SkillSearchTool {
+    pub skills_dir: PathBuf,
+}
+
+#[async_trait]
+impl Tool for SkillSearchTool {
+    fn schema(&self) -> ToolSchema {
+        ToolSchema {
+            name: "skill_search".to_string(),
+            description: "Search installed skills and return ranked matches with usage hints."
+                .to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Search query for skills." },
+                    "include_disabled": { "type": "boolean", "default": false },
+                    "max_results": { "type": "integer", "default": 8 }
+                },
+                "required": ["query"]
+            }),
+            risk: ToolRisk::Safe,
+            requires_approval: false,
+        }
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
+        let start = Instant::now();
+        let query = match args.get("query").and_then(|v| v.as_str()) {
+            Some(v) if !v.trim().is_empty() => v.trim().to_lowercase(),
+            _ => {
+                return Ok(ToolResult::error(
+                    ctx.tool_call_id.clone(),
+                    "missing required argument: 'query'",
+                    start.elapsed().as_millis() as u64,
+                ));
+            }
+        };
+        let include_disabled = args
+            .get("include_disabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let max_results = args
+            .get("max_results")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(8)
+            .clamp(1, 20) as usize;
+
+        let mut scored: Vec<(i32, Skill)> = SkillLoader::load_from_dir(&self.skills_dir)
+            .into_iter()
+            .filter(|s| include_disabled || s.enabled)
+            .filter_map(|s| {
+                let id = skill_id(&s).to_lowercase();
+                let name = s.meta.name.to_lowercase();
+                let description = s.meta.description.to_lowercase();
+                let instructions = s.instructions.to_lowercase();
+                let mut score = 0i32;
+                if id.contains(&query) {
+                    score += 5;
+                }
+                if name.contains(&query) {
+                    score += 4;
+                }
+                if description.contains(&query) {
+                    score += 2;
+                }
+                if instructions.contains(&query) {
+                    score += 1;
+                }
+                (score > 0).then_some((score, s))
+            })
+            .collect();
+
+        if scored.is_empty() {
+            return Ok(ToolResult::success(
+                ctx.tool_call_id.clone(),
+                format!("No skills matched query '{}'.", query),
+                start.elapsed().as_millis() as u64,
+            ));
+        }
+
+        scored.sort_by(|(sa, a), (sb, b)| sb.cmp(sa).then_with(|| a.meta.name.cmp(&b.meta.name)));
+        let lines = scored
+            .into_iter()
+            .take(max_results)
+            .map(|(score, s)| {
+                let status = if s.enabled { "enabled" } else { "disabled" };
+                let hint = usage_hint(&s.instructions);
+                format!(
+                    "- {} (name: {}, status: {}, score: {})\n  description: {}\n  usage_hint: {}",
+                    skill_id(&s),
+                    s.meta.name,
+                    status,
+                    score,
+                    if s.meta.description.is_empty() {
+                        "(no description)"
+                    } else {
+                        s.meta.description.as_str()
+                    },
+                    if hint.is_empty() {
+                        "(no hint)"
+                    } else {
+                        hint.as_str()
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(ToolResult::success(
+            ctx.tool_call_id.clone(),
+            lines,
             start.elapsed().as_millis() as u64,
         ))
     }

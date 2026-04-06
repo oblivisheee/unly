@@ -190,6 +190,16 @@ Approval behavior:
 | `git_status` | Safe | `git status` output |
 | `git_log` | Safe | `git log` output |
 | `shell` / `bash` | Dangerous | Execute shell commands (allowlist-checked) |
+| `telegram_send_photo` | Safe | Send local image file to current Telegram chat |
+| `telegram_send_document` | Safe | Send local file as document to current Telegram chat |
+| `telegram_send_video` | Safe | Send local video file to current Telegram chat |
+| `telegram_send_audio` | Safe | Send local audio file to current Telegram chat |
+| `telegram_send_voice` | Safe | Send local voice file to current Telegram chat |
+| `telegram_send_animation` | Safe | Send local animation file to current Telegram chat |
+| `self_config_get` | Safe | Read current `config.toml` values |
+| `self_config_set` | Privileged | Update `config.toml` keys via dotted paths |
+| `skill_search` | Safe | Search installed skills by intent/keywords |
+| `skill_inspect` | Safe | Inspect one skill with full instructions |
 | `spawn_subagent` | Privileged | Delegate a task to a subagent (use only when user explicitly asks for delegation) |
 | `cron_job` | Privileged | Manage scheduled background jobs |
 
@@ -197,8 +207,9 @@ Approval behavior:
 
 ```toml
 [agent]
-max_subagent_depth      = 3
+max_subagent_depth      = 1
 max_concurrent_subagents = 4
+max_child_subagents_per_parent = 3
 max_tool_calls_per_turn = 10
 max_turns               = 100
 use_file_memory_primary = true

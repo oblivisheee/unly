@@ -213,6 +213,14 @@ impl Default for ToolsConfig {
                 "bash".to_string(),
                 "spawn_subagent".to_string(),
                 "cron_job".to_string(),
+                "self_config_get".to_string(),
+                "self_config_set".to_string(),
+                "skill_search".to_string(),
+                "skill_inspect".to_string(),
+                "telegram_send_video".to_string(),
+                "telegram_send_audio".to_string(),
+                "telegram_send_voice".to_string(),
+                "telegram_send_animation".to_string(),
             ],
             disabled_tools: Vec::new(),
             require_approval_for_privileged: true,
@@ -278,9 +286,9 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            max_subagent_depth: 3,
+            max_subagent_depth: 1,
             max_concurrent_subagents: 4,
-            max_child_subagents_per_parent: 5,
+            max_child_subagents_per_parent: 3,
             subagent_token_budget: 8192,
             max_tool_calls_per_turn: 10,
             max_turns: 100,

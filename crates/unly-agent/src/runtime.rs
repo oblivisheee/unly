@@ -130,7 +130,7 @@ impl AgentRuntime {
             return Err(unly_core::Error::Agent("max turns exceeded".to_string()));
         }
 
-        let tool_defs = self.build_tool_defs();
+        let tool_defs = self.build_tool_defs(ctx);
         let provider = self.get_provider(&ctx.provider)?;
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
@@ -205,6 +205,7 @@ impl AgentRuntime {
                         user_id: ctx.user_id,
                         chat_id: Some(ctx.chat_id),
                         agent_id: Some(ctx.agent_id),
+                        subagent_depth: ctx.subagent_depth,
                     };
 
                     loop_count += 1;
@@ -414,7 +415,7 @@ impl AgentRuntime {
             return Err(unly_core::Error::Agent("max turns exceeded".to_string()));
         }
 
-        let tool_defs = self.build_tool_defs();
+        let tool_defs = self.build_tool_defs(ctx);
         let provider = self.get_provider(&ctx.provider)?;
         let mut loop_count = 0u32;
         let mut forced_tool_retry = false;
@@ -498,6 +499,7 @@ impl AgentRuntime {
                         user_id: ctx.user_id,
                         chat_id: Some(ctx.chat_id),
                         agent_id: Some(ctx.agent_id),
+                        subagent_depth: ctx.subagent_depth,
                     };
 
                     let result = self
@@ -699,6 +701,7 @@ impl AgentRuntime {
                 user_id: ctx.user_id,
                 chat_id: Some(ctx.chat_id),
                 agent_id: Some(ctx.agent_id),
+                subagent_depth: ctx.subagent_depth,
             };
 
             let result = self
@@ -758,7 +761,7 @@ impl AgentRuntime {
 
     async fn continue_from_tools(&self, ctx: &mut AgentContext) -> Result<AgentResponse> {
         let provider = self.get_provider(&ctx.provider)?;
-        let tool_defs = self.build_tool_defs();
+        let tool_defs = self.build_tool_defs(ctx);
 
         let request = ChatRequest {
             model: ctx.model.clone(),
@@ -791,10 +794,12 @@ impl AgentRuntime {
         Ok(AgentResponse::Text(text))
     }
 
-    fn build_tool_defs(&self) -> Vec<unly_core::model::ToolDefinition> {
+    fn build_tool_defs(&self, ctx: &AgentContext) -> Vec<unly_core::model::ToolDefinition> {
+        let allow_spawn_subagent = should_expose_spawn_subagent(ctx);
         self.tool_registry
             .list_schemas()
             .into_iter()
+            .filter(|schema| allow_spawn_subagent || schema.name != "spawn_subagent")
             .map(|schema| unly_core::model::ToolDefinition {
                 r#type: "function".to_string(),
                 function: unly_core::model::FunctionDefinition {
@@ -1102,6 +1107,34 @@ fn looks_like_manual_confirmation_request(text: &str) -> bool {
         || t.contains("что предпочтительнее")
 }
 
+fn should_expose_spawn_subagent(ctx: &AgentContext) -> bool {
+    if ctx.subagent_depth > 0 {
+        return false;
+    }
+
+    let Some(last_user_text) =
+        ctx.messages
+            .iter()
+            .rev()
+            .find_map(|m| match (&m.role[..], &m.content) {
+                ("user", ChatMessageContent::Text(t)) => Some(t.as_str()),
+                _ => None,
+            })
+    else {
+        return false;
+    };
+
+    let t = last_user_text.to_lowercase();
+    t.contains("/spawn_subagent")
+        || t.contains("subagent")
+        || t.contains("sub-agent")
+        || t.contains("delegate")
+        || t.contains("delegat")
+        || t.contains("delegation")
+        || t.contains("субагент")
+        || t.contains("делег")
+}
+
 fn build_runtime_extensions_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> String {
     let skills = SkillLoader::load_from_dir(&config.plugins.skills_dir);
     let plugins = PluginLoader::load_from_dir(&config.plugins.plugins_dir);
@@ -1126,6 +1159,36 @@ If earlier sections conflict with this one, treat this section as authoritative.
     if active_skills.is_empty() {
         out.push_str("- none\n\n");
     } else {
+        out.push_str("### Skill Index\n\n");
+        for skill in &active_skills {
+            let id = skill
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(skill.meta.name.as_str());
+            let hint = skill
+                .instructions
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---"))
+                .map(|l| l.chars().take(140).collect::<String>())
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "- `{}` — {}{}\n",
+                id,
+                if skill.meta.description.is_empty() {
+                    "(no description)"
+                } else {
+                    skill.meta.description.as_str()
+                },
+                if hint.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | hint: {}", hint)
+                }
+            ));
+        }
+        out.push_str("\n### Skill Details\n\n");
         for skill in &active_skills {
             out.push_str(&format!(
                 "### {} — {}\n\n{}\n\n",
@@ -1168,6 +1231,11 @@ If earlier sections conflict with this one, treat this section as authoritative.
         policy.max_execution_seconds,
         policy.max_concurrent,
     ));
+    out.push_str(
+        "- delegation policy: use `spawn_subagent` only when the user explicitly asks for delegation/subagents.\n\
+- delegation exclusions: do not use subagents for simple single-step tasks.\n\
+- recursion policy: subagents must not spawn child subagents.\n",
+    );
 
     out
 }
@@ -1232,10 +1300,13 @@ fn collect_media_from_result(ctx: &mut AgentContext, meta: &serde_json::Value) {
             .get("kind")
             .and_then(|v| v.as_str())
             .unwrap_or("document");
-        let kind = if kind_str == "photo" {
-            MediaKind::Photo
-        } else {
-            MediaKind::Document
+        let kind = match kind_str {
+            "photo" => MediaKind::Photo,
+            "video" => MediaKind::Video,
+            "audio" => MediaKind::Audio,
+            "voice" => MediaKind::Voice,
+            "animation" => MediaKind::Animation,
+            _ => MediaKind::Document,
         };
         let path = match send_info.get("path").and_then(|v| v.as_str()) {
             Some(p) => p.to_string(),

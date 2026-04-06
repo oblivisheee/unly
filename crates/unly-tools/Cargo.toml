@@ -28,6 +28,7 @@ once_cell.workspace = true
 parking_lot.workspace = true
 sea-orm.workspace = true
 cron.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

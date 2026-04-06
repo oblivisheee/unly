@@ -126,10 +126,27 @@ enabled = true
 | `max_execution_seconds` | int | `30` | Tool timeout |
 | `shell_allowlist` | array | `[]` | Regex patterns for allowed shell commands |
 
+Telegram media tools available in defaults:
+- `telegram_send_photo`
+- `telegram_send_document`
+- `telegram_send_video`
+- `telegram_send_audio`
+- `telegram_send_voice`
+- `telegram_send_animation`
+
+Self-configuration tools available in defaults:
+- `self_config_get`
+- `self_config_set`
+- `skill_search`
+- `skill_inspect`
+
 ### `[agent]`
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `system_prompt` | string | (built-in) | System prompt for every conversation |
+| `max_subagent_depth` | int | `1` | Maximum nested subagent depth (`1` = only top-level children, no recursion) |
+| `max_concurrent_subagents` | int | `4` | Maximum concurrently running subagents |
+| `max_child_subagents_per_parent` | int | `3` | Maximum child subagents a single parent agent can spawn |
 | `max_tool_calls_per_turn` | int | `10` | Max tool calls per agent turn |
 | `max_turns` | int | `100` | Max turns before reset |
 

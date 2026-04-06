@@ -78,6 +78,7 @@ pub struct ToolContext {
     pub user_id: Option<crate::ids::UserId>,
     pub chat_id: Option<crate::ids::ChatId>,
     pub agent_id: Option<crate::ids::AgentId>,
+    pub subagent_depth: u32,
 }
 
 /// A tool that can be registered and invoked.

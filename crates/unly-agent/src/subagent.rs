@@ -76,7 +76,11 @@ impl SubagentManager {
         runtime: Arc<AgentRuntime>,
         chat_id: unly_core::ids::ChatId,
     ) -> Result<SubagentHandle> {
-        if request.depth >= self.config.max_depth {
+        let parent_depth = self
+            .parent_subagent_depth(request.parent_agent_id)
+            .await
+            .unwrap_or(request.depth);
+        if parent_depth >= self.config.max_depth {
             return Err(unly_core::Error::SubagentLimitExceeded);
         }
         let existing_children = self.count_children(request.parent_agent_id).await;
@@ -92,7 +96,7 @@ impl SubagentManager {
         let row = subagents::ActiveModel {
             id: Set(agent_id.to_string()),
             parent_agent_id: Set(Some(request.parent_agent_id.to_string())),
-            depth: Set((request.depth + 1) as i32),
+            depth: Set((parent_depth + 1) as i32),
             goal: Set(request.goal.clone()),
             status: Set("pending".to_string()),
             provider: Set(request.provider.clone()),
@@ -124,7 +128,7 @@ impl SubagentManager {
             .clone()
             .unwrap_or_else(|| "gpt-4o".to_string());
         let perms = request.permissions.clone();
-        let depth = request.depth + 1;
+        let depth = parent_depth + 1;
         let token_budget = request.token_budget;
         let logs_goal = request.goal.clone();
 
@@ -426,6 +430,23 @@ This subagent completed partial work up to this point; review the logs for progr
             return cnt.max(0) as u64;
         }
         0
+    }
+
+    async fn parent_subagent_depth(&self, parent_agent_id: AgentId) -> Option<u32> {
+        let backend = match self.db.db_type() {
+            unly_config::DbType::Postgres => DatabaseBackend::Postgres,
+            unly_config::DbType::Sqlite => DatabaseBackend::Sqlite,
+        };
+        let stmt = Statement::from_string(
+            backend,
+            format!(
+                "SELECT depth FROM subagents WHERE id='{}' LIMIT 1",
+                escape_sql(&parent_agent_id.to_string())
+            ),
+        );
+        let row = self.db.conn().query_one(stmt).await.ok().flatten()?;
+        let depth: i32 = row.try_get("", "depth").ok()?;
+        Some(depth.max(0) as u32)
     }
 
     fn write_subagent_log(

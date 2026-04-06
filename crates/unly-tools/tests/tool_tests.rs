@@ -21,6 +21,7 @@ fn make_ctx() -> ToolContext {
         user_id: None,
         chat_id: None,
         agent_id: None,
+        subagent_depth: 0,
     }
 }
 

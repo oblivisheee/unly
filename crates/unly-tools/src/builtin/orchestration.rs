@@ -91,6 +91,13 @@ impl Tool for SpawnSubagentTool {
 
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult> {
         let start = Instant::now();
+        if ctx.subagent_depth > 0 {
+            return Ok(ToolResult::error(
+                ctx.tool_call_id.clone(),
+                "nested subagent spawning is disabled: subagents cannot spawn child subagents",
+                start.elapsed().as_millis() as u64,
+            ));
+        }
         let Some(task) = args.get("task").and_then(|v| v.as_str()).map(str::trim) else {
             return Ok(ToolResult::error(
                 ctx.tool_call_id.clone(),

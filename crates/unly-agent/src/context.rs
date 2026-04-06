@@ -12,6 +12,10 @@ use unly_core::{
 pub enum MediaKind {
     Photo,
     Document,
+    Video,
+    Audio,
+    Voice,
+    Animation,
 }
 
 /// A media file queued for delivery to the Telegram chat by the tool runtime.

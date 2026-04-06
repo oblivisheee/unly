@@ -16,8 +16,10 @@ use unly_tools::{
         CronJobTool, FsCopyTool, FsDeleteTool, FsGrepTool, FsListTool, FsMkdirTool, FsMoveTool,
         FsReadTool, FsStatTool, FsWriteTool, GitLogTool, GitStatusTool, HttpGetTool, HttpPostTool,
         PluginCreateTool, PluginDisableTool, PluginEnableTool, PluginListTool, PluginRemoveTool,
-        SkillCreateTool, SkillDisableTool, SkillEnableTool, SkillListTool, SkillRemoveTool,
-        SpawnSubagentTool, TelegramSendDocumentTool, TelegramSendPhotoTool, create_scheduler,
+        SelfConfigGetTool, SelfConfigSetTool, SkillCreateTool, SkillDisableTool, SkillEnableTool,
+        SkillInspectTool, SkillListTool, SkillRemoveTool, SkillSearchTool, SpawnSubagentTool,
+        TelegramSendAnimationTool, TelegramSendAudioTool, TelegramSendDocumentTool,
+        TelegramSendPhotoTool, TelegramSendVideoTool, TelegramSendVoiceTool, create_scheduler,
     },
     policy::ExecutionPolicy,
 };
@@ -40,9 +42,13 @@ fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
         "cron_job",
         "skill_list",
         "skill_create",
+        "skill_search",
+        "skill_inspect",
         "skill_enable",
         "skill_disable",
         "skill_remove",
+        "self_config_get",
+        "self_config_set",
         "plugin_list",
         "plugin_create",
         "plugin_enable",
@@ -50,6 +56,10 @@ fn ensure_core_native_tools(mut enabled: Vec<String>) -> Vec<String> {
         "plugin_remove",
         "telegram_send_photo",
         "telegram_send_document",
+        "telegram_send_video",
+        "telegram_send_audio",
+        "telegram_send_voice",
+        "telegram_send_animation",
     ] {
         if !enabled.iter().any(|t| t == name) {
             enabled.push(name.to_string());
@@ -115,10 +125,18 @@ fn register_management_tools(registry: &mut ToolRegistry, config: &AppConfig) {
     registry.register(SkillEnableTool {
         skills_dir: skills_dir.clone(),
     });
+    registry.register(SkillSearchTool {
+        skills_dir: skills_dir.clone(),
+    });
+    registry.register(SkillInspectTool {
+        skills_dir: skills_dir.clone(),
+    });
     registry.register(SkillDisableTool {
         skills_dir: skills_dir.clone(),
     });
     registry.register(SkillRemoveTool { skills_dir });
+    registry.register(SelfConfigGetTool);
+    registry.register(SelfConfigSetTool);
     registry.register(PluginListTool {
         plugins_dir: plugins_dir.clone(),
     });
@@ -175,6 +193,10 @@ pub fn build_tools(config: &AppConfig) -> Arc<ToolRegistry> {
     ));
     registry.register(TelegramSendPhotoTool);
     registry.register(TelegramSendDocumentTool);
+    registry.register(TelegramSendVideoTool);
+    registry.register(TelegramSendAudioTool);
+    registry.register(TelegramSendVoiceTool);
+    registry.register(TelegramSendAnimationTool);
     registry.register(SpawnSubagentTool);
     register_management_tools(&mut registry, config);
 
@@ -224,6 +246,10 @@ pub fn build_tools_with_scheduler(
     ));
     registry.register(TelegramSendPhotoTool);
     registry.register(TelegramSendDocumentTool);
+    registry.register(TelegramSendVideoTool);
+    registry.register(TelegramSendAudioTool);
+    registry.register(TelegramSendVoiceTool);
+    registry.register(TelegramSendAnimationTool);
     registry.register(SpawnSubagentTool);
     let scheduler = create_scheduler(db.clone(), &config.scheduler);
     registry.register(CronJobTool::new(db, scheduler.clone()));
@@ -303,6 +329,36 @@ pub fn load_system_prompt(tool_registry: &ToolRegistry, config: &AppConfig) -> S
             String::new()
         } else {
             let mut section = SKILLS_SECTION_HEADER.to_string();
+            section.push_str("## Skill Index\n\n");
+            for skill in &active {
+                let id = skill
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(skill.meta.name.as_str());
+                let hint = skill
+                    .instructions
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---"))
+                    .map(|l| l.chars().take(140).collect::<String>())
+                    .unwrap_or_default();
+                section.push_str(&format!(
+                    "- `{}` — {}{}\n",
+                    id,
+                    if skill.meta.description.is_empty() {
+                        "(no description)"
+                    } else {
+                        skill.meta.description.as_str()
+                    },
+                    if hint.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" | hint: {}", hint)
+                    }
+                ));
+            }
+            section.push_str("\n## Skill Details\n\n");
             for skill in &active {
                 section.push_str(&format!(
                     "## {} — {}\n\n{}\n\n",
@@ -370,7 +426,7 @@ user approval before execution."
     };
     let approval_behavior_directive = "- Approval behavior: never ask for permission in plain text (no \"confirm?\", \"allow?\", \"shall I proceed?\"). \
 If a tool is needed, call the tool immediately and let runtime handle Approve/Deny. \
-For cron tasks, prefer the native `cron_job` tool. Use `spawn_subagent` only when the user explicitly asks for a subagent/delegation. \
+For cron tasks, prefer the native `cron_job` tool. Use `spawn_subagent` only when the user explicitly asks for a subagent/delegation, and never for simple single-step tasks. \
 When creating cron jobs, set `notify_mode` explicitly from user intent: use `silent` only when user explicitly asks for no notifications; otherwise use `message`."
         .to_string();
 
@@ -384,7 +440,7 @@ When creating cron jobs, set `notify_mode` explicitly from user intent: use `sil
 - Native runtime capabilities include:
   - `spawn_subagent` for background delegated tasks with full runtime permissions (after approval by policy).
   - `cron_job` for scheduled tasks (`create/list/enable/disable/run_now/delete`) with `notify_mode` support.
-  - `telegram_send_photo` and `telegram_send_document` for sending local files to the current Telegram chat.
+  - `telegram_send_*` media tools (`photo/document/video/audio/voice/animation`) for sending local files to the current Telegram chat.
   - terminal command execution tools (subject to policy/permissions).
 - Policy details:
   - require approval for privileged: {}
@@ -392,7 +448,7 @@ When creating cron jobs, set `notify_mode` explicitly from user intent: use `sil
   - max tool execution seconds: {}
   - max concurrent tools: {}
 - You have persistent semantic memory and should retain durable non-secret user context.
-- Use subagents only when the user explicitly requests delegation/subagent execution.
+- Use subagents only when the user explicitly requests delegation/subagent execution, and never for simple one-step actions.
 - Think before speaking: keep planning/tool execution in the internal thinking phase; only return final user-facing output.
 - Support both model types: with explicit reasoning channels and without them.
 - Never fabricate outcomes, access, or tool results; explicitly state limitations when access is unavailable.
