@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use unly_core::{
     ids::{AgentId, ChatId, UserId},
@@ -160,6 +162,39 @@ impl AgentContext {
             let remove = self.messages.len() - max_messages;
             self.messages.drain(0..remove);
         }
+        self.prune_orphan_tool_messages();
+    }
+
+    /// Drop `tool` messages that no longer have a matching preceding
+    /// assistant `tool_calls` entry (can happen after context trimming).
+    fn prune_orphan_tool_messages(&mut self) {
+        let mut known_tool_calls: HashSet<String> = HashSet::new();
+        let mut normalized = Vec::with_capacity(self.messages.len());
+
+        for msg in self.messages.drain(..) {
+            if msg.role == "assistant" {
+                if let Some(calls) = msg.tool_calls.as_ref() {
+                    for call in calls {
+                        known_tool_calls.insert(call.id.clone());
+                    }
+                }
+                normalized.push(msg);
+                continue;
+            }
+
+            if msg.role == "tool" {
+                let Some(tool_call_id) = msg.tool_call_id.as_ref() else {
+                    continue;
+                };
+                if !known_tool_calls.contains(tool_call_id) {
+                    continue;
+                }
+            }
+
+            normalized.push(msg);
+        }
+
+        self.messages = normalized;
     }
 
     fn tool_approval_mode_prompt(&self) -> Option<String> {

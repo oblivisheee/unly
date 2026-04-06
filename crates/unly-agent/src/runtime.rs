@@ -147,7 +147,7 @@ impl AgentRuntime {
             // Tool-call rounds are "thinking" — we use the non-streaming chat API.
             let request = ChatRequest {
                 model: ctx.model.clone(),
-                messages: ctx.build_messages_with_memory(memory_ctx.as_deref()),
+                messages: self.build_request_messages(ctx, memory_ctx.as_deref()),
                 tools: if tool_defs.is_empty() {
                     None
                 } else {
@@ -452,7 +452,7 @@ impl AgentRuntime {
             // We only stream the FINAL response (when there are no more tools to call).
             let probe_request = ChatRequest {
                 model: ctx.model.clone(),
-                messages: ctx.build_messages_with_memory(memory_ctx.as_deref()),
+                messages: self.build_request_messages(ctx, memory_ctx.as_deref()),
                 tools: if tool_defs.is_empty() {
                     None
                 } else {
@@ -674,7 +674,7 @@ impl AgentRuntime {
             // --- RESPONSE PHASE: stream the final answer ---
             let stream_request = ChatRequest {
                 model: ctx.model.clone(),
-                messages: ctx.build_messages_with_memory(memory_ctx.as_deref()),
+                messages: self.build_request_messages(ctx, memory_ctx.as_deref()),
                 tools: None, // No tools on the final response stream
                 temperature: Some(0.7),
                 max_tokens: Some(4096),
@@ -805,7 +805,7 @@ impl AgentRuntime {
 
         let request = ChatRequest {
             model: ctx.model.clone(),
-            messages: ctx.build_messages_with_memory(None),
+            messages: self.build_request_messages(ctx, None),
             tools: if tool_defs.is_empty() {
                 None
             } else {
@@ -1029,56 +1029,57 @@ impl AgentRuntime {
     }
 
     async fn store_memory_turn(&self, ctx: &AgentContext, user_msg: &str, assistant_msg: &str) {
-        if !self.config.memory_store_conversation_turns {
-            return;
-        }
-        let Some(store) = self.memory_store.as_ref() else {
-            return;
-        };
         let user_clean = sanitize_memory_text(user_msg);
         let assistant_clean = sanitize_memory_text(assistant_msg);
         if user_clean.is_empty() && assistant_clean.is_empty() {
             return;
         }
 
-        let base_content = format!("User: {}\nAssistant: {}", user_clean, assistant_clean);
-        let max_len = self.config.memory_store_max_chars_per_turn.max(64);
-        let content = truncate_to_chars(&base_content, max_len);
+        if self.config.memory_store_conversation_turns
+            && let Some(store) = self.memory_store.as_ref()
+        {
+            let base_content = format!("User: {}\nAssistant: {}", user_clean, assistant_clean);
+            let max_len = self.config.memory_store_max_chars_per_turn.max(64);
+            let content = truncate_to_chars(&base_content, max_len);
 
-        let metadata = serde_json::json!({
-            "kind": "conversation_turn",
-            "agent_id": ctx.agent_id.to_string(),
-            "chat_id": ctx.chat_id.to_string(),
-            "turn": ctx.turn_count,
-        });
+            let metadata = serde_json::json!({
+                "kind": "conversation_turn",
+                "agent_id": ctx.agent_id.to_string(),
+                "chat_id": ctx.chat_id.to_string(),
+                "turn": ctx.turn_count,
+            });
 
-        let _ = store
-            .store(
-                MemoryScope::Chat(ctx.chat_id.to_string()),
-                content.clone(),
-                Some("conversation".to_string()),
-                Some(ctx.agent_id.to_string()),
-                metadata.clone(),
-                None,
-            )
-            .await;
-
-        if let Some(user_id) = ctx.user_id {
             let _ = store
                 .store(
-                    MemoryScope::User(user_id.to_string()),
-                    content,
+                    MemoryScope::Chat(ctx.chat_id.to_string()),
+                    content.clone(),
                     Some("conversation".to_string()),
                     Some(ctx.agent_id.to_string()),
-                    metadata,
+                    metadata.clone(),
                     None,
                 )
                 .await;
+
+            if let Some(user_id) = ctx.user_id {
+                let _ = store
+                    .store(
+                        MemoryScope::User(user_id.to_string()),
+                        content,
+                        Some("conversation".to_string()),
+                        Some(ctx.agent_id.to_string()),
+                        metadata,
+                        None,
+                    )
+                    .await;
+            }
+            debug!(chat_id = %ctx.chat_id, "stored memory for turn");
         }
-        debug!(chat_id = %ctx.chat_id, "stored memory for turn");
 
         if self.config.use_file_memory_primary && self.config.append_turns_to_today_memory {
             self.append_today_file_memory(ctx, &user_clean, &assistant_clean);
+        }
+        if self.config.use_file_memory_primary {
+            self.append_durable_facts_to_memory_index(ctx, &user_clean);
         }
     }
 
@@ -1100,6 +1101,75 @@ impl AgentRuntime {
         {
             let _ = f.write_all(entry.as_bytes());
         }
+    }
+
+    fn append_durable_facts_to_memory_index(&self, ctx: &AgentContext, user: &str) {
+        let facts = extract_durable_memory_facts(user);
+        if facts.is_empty() {
+            return;
+        }
+        let path = std::path::Path::new(&self.config.file_memory_index_path);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let mut new_entries = Vec::new();
+        let existing_lower = existing.to_lowercase();
+        for fact in facts {
+            let fact_lower = fact.to_lowercase();
+            if !existing_lower.contains(&fact_lower) {
+                new_entries.push(fact);
+            }
+        }
+        if new_entries.is_empty() {
+            return;
+        }
+
+        let mut block = String::new();
+        if !existing.contains("## Durable Facts") {
+            block.push_str("\n## Durable Facts\n");
+        }
+        for fact in new_entries {
+            block.push_str(&format!(
+                "- {} (chat: {}, turn: {})\n",
+                fact, ctx.chat_id, ctx.turn_count
+            ));
+        }
+
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = f.write_all(block.as_bytes());
+        }
+    }
+
+    fn build_request_messages(
+        &self,
+        ctx: &AgentContext,
+        memory_ctx: Option<&str>,
+    ) -> Vec<ChatMessage> {
+        let mut messages = ctx.build_messages_with_memory(memory_ctx);
+        messages.insert(
+            1,
+            ChatMessage {
+                role: "system".to_string(),
+                content: ChatMessageContent::Text(
+                    "Per-request mandatory check: \
+1) Skill relevance check against available skills; if relevant, apply those instructions. \
+2) Memory relevance check against provided memory context; use only relevant durable facts. \
+3) When user gives explicit durable preferences/profile/constraints, retain concise non-secret facts."
+                        .to_string(),
+                ),
+                tool_call_id: None,
+                tool_calls: None,
+                name: None,
+            },
+        );
+        messages
     }
 }
 
@@ -1393,6 +1463,50 @@ fn sanitize_memory_text(text: &str) -> String {
         return "[redacted-sensitive-content]".to_string();
     }
     text.trim().to_string()
+}
+
+fn extract_durable_memory_facts(user_text: &str) -> Vec<String> {
+    let text = user_text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let markers = [
+        "запомни",
+        "важно помнить",
+        "предпочита",
+        "называй меня",
+        "меня зовут",
+        "мой часовой пояс",
+        "remember",
+        "important to remember",
+        "i prefer",
+        "call me",
+        "my name is",
+        "my timezone",
+        "always ",
+        "never ",
+    ];
+    let lower = text.to_lowercase();
+    if !markers.iter().any(|m| lower.contains(m)) {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let candidate = line.trim().trim_start_matches("- ").trim();
+        if candidate.len() < 8 {
+            continue;
+        }
+        let c_lower = candidate.to_lowercase();
+        if markers.iter().any(|m| c_lower.contains(m)) {
+            out.push(truncate_to_chars(candidate, 220));
+        }
+    }
+    if out.is_empty() {
+        out.push(truncate_to_chars(text, 220));
+    }
+    out
 }
 
 fn truncate_to_chars(text: &str, max: usize) -> String {

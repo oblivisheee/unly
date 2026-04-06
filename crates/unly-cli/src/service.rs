@@ -448,6 +448,8 @@ When creating cron jobs, set `notify_mode` explicitly from user intent: use `sil
   - max tool execution seconds: {}
   - max concurrent tools: {}
 - You have persistent semantic memory and should retain durable non-secret user context.
+- On every request, first check skill relevance and memory relevance before deciding response/tool flow.
+- Persist only explicit durable non-secret user facts into MEMORY.md; avoid transient/noisy data.
 - Use subagents only when the user explicitly requests delegation/subagent execution, and never for simple one-step actions.
 - Think before speaking: keep planning/tool execution in the internal thinking phase; only return final user-facing output.
 - Support both model types: with explicit reasoning channels and without them.
